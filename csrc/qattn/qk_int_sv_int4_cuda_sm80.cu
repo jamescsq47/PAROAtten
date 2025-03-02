@@ -18,6 +18,7 @@
 #include <cuda_fp16.h>
 #include <cuda_pipeline_primitives.h>
 #include <torch/extension.h>
+#include <cub/cub.cuh>
 
 #include "../cp_async.cuh"
 #include "../mma.cuh"
@@ -39,11 +40,11 @@
 // fp16 tensor core
 #define MMA_SV_M 16
 #define MMA_SV_N 16
-#define MMA_SV_K 16
+#define MMA_SV_K 64
 
 template<uint32_t CTA_Q, uint32_t CTA_K, uint32_t WARP_Q, uint32_t WARP_K, uint32_t head_dim, DataType DTypeQK, QuantGranularity Q_GRAN, QuantGranularity K_GRAN,
         typename DTypeSVAccum = float, bool use_inst_buffer = false, typename DTypeOut = half, ComputeUnit DenominatorAccumUnit, MaskMode mask_mode = MaskMode::kNone, bool return_lse = false, bool fuse_v_mean=false>
-__global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, DTypeOut *__restrict__ O, float *__restrict__ Lse,
+__global__ void qk_int_sv_int4_attn_kernel(int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V, DTypeOut *__restrict__ O, float *__restrict__ Lse,
                       float *__restrict__ Q_scale, float *__restrict__ K_scale, DTypeOut *__restrict__ V_mean,
                       const uint32_t qo_len, const uint32_t kv_len, const uint32_t num_kv_groups,
                       const uint32_t stride_bz_q, const uint32_t stride_seq_q, const uint32_t stride_h_q,
@@ -63,6 +64,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
   static_assert(!fuse_v_mean || std::is_same<DTypeSVAccum, half>::value, "fuse_v_mean only supports half");
   static_assert(CTA_Q / CTA_K <= 2); // for efficient causal implementation
 
+  
   using DTypeOut2 = typename std::conditional<std::is_same<DTypeOut, half>::value, half2, nv_bfloat162>::type;
 
   constexpr uint32_t num_warps_q = CTA_Q / WARP_Q;
@@ -257,6 +259,112 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V, V_load_idx_lane_base, kv_len);
   cp_async::commit_group();
 
+  // quantization v to int4 
+  __shared__ uint32_t smem_quantized_V[num_tiles_q][num_tiles_k];  
+  __shared__ float V_abs_max;
+  __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
+  float v_thread_max = 0.0000001f;
+  uint32_t RV[num_tiles_q][num_tiles_k][4];
+  const half* half_ptr = reinterpret_cast<const half*>(RV);
+  uint32_t offset_V=V_smem_offset_mma;
+  half val;
+  uint32_t packed=0;
+  float f_val=0.0f;
+  int32_t int4_val=0;
+
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+  {
+    #pragma unroll  
+    for (uint32_t fk = 0; fk < num_tiles_k; fk++) {
+      smem_V.ldmatrix_m8n8x4_trans(offset_V, RV[fq][fk]);
+      offset_V = smem_V.advance_offset_by_column<2>(offset_V, fk);
+    
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 0];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 1];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 2];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 3];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 4];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 5];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 6];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 7];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+    }
+    offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  }
+
+  
+  float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(v_thread_max, cub::Max());
+  if (threadIdx.x == 0) {
+    V_abs_max = block_max;
+  }
+  __syncthreads();
+
+  float v_scale = 7.0f / V_abs_max;
+  offset_V=V_smem_offset_mma;
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++){
+    #pragma unroll
+    for (uint32_t fk = 0; fk < num_tiles_k; fk ++) {
+      // smem_V.ldmatrix_m8n8x4_trans(offset_V, smem_quantized_V[fq]);
+      // offset_V = smem_V.advance_offset_by_column<2>(offset_V, fk);
+      packed = 0;
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 0]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (0 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 1]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (1 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 2]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (2 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 3]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (3 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 4]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (4 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 5]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (5 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 6]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (6 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 7]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (7 * 4));
+        
+      smem_quantized_V[fq][fk] = packed;
+    }
+    offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  }
+  //}
+  __syncthreads();
+
+
+
   K_load_idx_lane_base += CTA_K;
   V_load_idx_lane_base += CTA_K;
 
@@ -264,10 +372,9 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
   for (uint32_t iter = 1; iter < num_iterations - 1; iter++)
   {
     if (sparse[blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y+iter] == false)
-    {
-      continue;
-    }
-  
+  {
+    continue;
+  }
     // ensure K is ready
     cp_async::wait_group<1>();
     __syncthreads();
@@ -285,7 +392,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     }
 
     float RS_f32[num_tiles_q][num_tiles_k][8];
-
+    float thread_max = 0.0000001f;
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
     {
@@ -317,13 +424,61 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kCudaCore>(RS_f32, d);
     }
 
-    uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
-    RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
+    uint32_t RS_int4[num_tiles_q][num_tiles_k][1];
+    __shared__ float RS_max;
+    __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
+    int32_t int4_val=0;
 
-    if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
-    {
-      accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    thread_max=max(thread_max,m[fq][0]);
+  }
+
+  float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
+  if (threadIdx.x == 0) {
+    RS_max = block_max;
+  }
+  __syncthreads();
+  float s_scale = 15.0f / RS_max;
+
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    #pragma unroll
+    for (uint32_t fk = 0; fk < num_tiles_k; fk++) {
+      RS_int4[fq][fk][0]= 0; 
+      int4_val = __float2int_rn(RS_f32[fq][fk][0] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (0 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][1] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (1 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][2] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (2 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][3] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (3 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][4] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (4 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][5] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (5 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][6] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (6 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][7] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (7 * 4));
     }
+  }
+
+    // uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
+    // RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
+
+    // if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
+    // {
+    //   accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
+    // }
 
     __syncthreads();
 
@@ -338,17 +493,30 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     // ensure V is ready
     cp_async::wait_group<1>();
     __syncthreads();
-
+    uint32_t zero=0;
     if constexpr (!use_inst_buffer)
     {
-      compute_fp16_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-        smem_V, RS_f16, RO, d, V_smem_offset_mma);
+      compute_int4_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 1>(
+        smem_quantized_V, RS_int4, RO, d, zero);
     }
     else
     {
-      compute_fp16_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-        smem_V, RS_f16, RO, d, V_smem_offset_mma); 
+      compute_int4_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 1>(
+        smem_quantized_V, RS_int4, RO, d, zero); 
     }
+
+    float sv_dequant_scale = 1.0 / s_scale /v_scale;
+
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    #pragma unroll
+    for (uint32_t fv = 0; fv < num_tiles_v; fv++) {
+      #pragma unroll
+      for (uint32_t k = 0; k < 8; k++) {
+        RO[fq][fv][k] = static_cast<float>(RO[fq][fv][k]) * sv_dequant_scale;
+      }
+    }
+  }
 
     __syncthreads();
     // load V
@@ -357,6 +525,98 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     cp_async::commit_group();
     K_load_idx_lane_base += CTA_K;
     V_load_idx_lane_base += CTA_K;
+
+
+  v_thread_max = 0.0000001f;
+  offset_V=V_smem_offset_mma;
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+  {
+    #pragma unroll  
+    for (uint32_t fk = 0; fk < num_tiles_k; fk++) {
+      smem_V.ldmatrix_m8n8x4_trans(offset_V, RV[fq][fk]);
+      offset_V = smem_V.advance_offset_by_column<2>(offset_V, fk);
+    
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 0];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 1];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 2];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 3];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 4];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 5];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 6];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 7];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+    }
+    offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  }
+
+  block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(v_thread_max, cub::Max());
+  if (threadIdx.x == 0) {
+    V_abs_max = block_max;
+  }
+  __syncthreads();
+
+  v_scale = 7.0f / V_abs_max;
+  offset_V=V_smem_offset_mma;
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++){
+    #pragma unroll
+    for (uint32_t fk = 0; fk < num_tiles_k; fk ++) {
+      // smem_V.ldmatrix_m8n8x4_trans(offset_V, smem_quantized_V[fq]);
+      // offset_V = smem_V.advance_offset_by_column<2>(offset_V, fk);
+      packed = 0;
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 0]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (0 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 1]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (1 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 2]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (2 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 3]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (3 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 4]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (4 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 5]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (5 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 6]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (6 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 7]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (7 * 4));
+        
+      smem_quantized_V[fq][fk] = packed;
+    }
+    offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  }
+  __syncthreads();
   }
   
   // second last iter, apply causal mask
@@ -379,7 +639,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     }
 
     float RS_f32[num_tiles_q][num_tiles_k][8];
-
+    float thread_max = 0.0000001f;
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
     {
@@ -394,6 +654,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
       }
     }
 
+    
     if constexpr (mask_mode == MaskMode::kCausal)
     {
       apply_causal_mask<num_tiles_q, num_tiles_k>(Q_idx_lane_base, K_idx_lane_base, RS_f32);
@@ -415,13 +676,61 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kCudaCore>(RS_f32, d);
     }
 
-    uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
-    RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
+    uint32_t RS_int4[num_tiles_q][num_tiles_k][1];
+    __shared__ float RS_max;
+    __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage; 
+    int32_t int4_val;
 
-    if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
-    {
-      accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
+    #pragma unroll
+    for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+      thread_max=max(thread_max,m[fq][0]);
     }
+
+  float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
+  if (threadIdx.x == 0) {
+    RS_max = block_max;
+  }
+  __syncthreads();
+  float s_scale = 15.0f / RS_max;
+
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    #pragma unroll
+    for (uint32_t fk = 0; fk < num_tiles_k; fk++) {
+      RS_int4[fq][fk][0]= 0; 
+      RS_int4[fq][fk][0]= 0; 
+      int4_val = __float2int_rn(RS_f32[fq][fk][0] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (0 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][1] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (1 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][2] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (2 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][3] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (3 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][4] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (4 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][5] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (5 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][6] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (6 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][7] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (7 * 4));
+    }
+  }
+    // uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
+    // RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
+
+    // if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
+    // {
+    //   accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
+    // }
 
     __syncthreads();
 
@@ -436,18 +745,30 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     // ensure V is ready
     cp_async::wait_group<1>();
     __syncthreads();
-
+    uint32_t zero=0;
     if constexpr (!use_inst_buffer)
     {
-      compute_fp16_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-        smem_V, RS_f16, RO, d, V_smem_offset_mma);
+      compute_int4_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 1>(
+        smem_quantized_V, RS_int4, RO, d, zero);
     }
     else
     {
-      compute_fp16_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-        smem_V, RS_f16, RO, d, V_smem_offset_mma);
+      compute_int4_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 1>(
+        smem_quantized_V, RS_int4, RO, d, zero);
     }
 
+    float sv_dequant_scale = 1.0 / s_scale /v_scale;
+
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    #pragma unroll
+    for (uint32_t fv = 0; fv < num_tiles_v; fv++) {
+      #pragma unroll
+      for (uint32_t k = 0; k < 8; k++) {
+        RO[fq][fv][k] = static_cast<float>(RO[fq][fv][k]) * sv_dequant_scale;
+      }
+    }
+  }
     __syncthreads();
     // load V with predicate
     load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
@@ -455,6 +776,98 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     cp_async::commit_group();
     K_load_idx_lane_base += CTA_K;
     V_load_idx_lane_base += CTA_K;
+    
+  v_thread_max = 0.0000001f;
+  offset_V=V_smem_offset_mma;
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+  {
+    #pragma unroll  
+    for (uint32_t fk = 0; fk < num_tiles_k; fk++) {
+      smem_V.ldmatrix_m8n8x4_trans(offset_V, RV[fq][fk]);
+      offset_V = smem_V.advance_offset_by_column<2>(offset_V, fk);
+    
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 0];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 1];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 2];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 3];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 4];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 5];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 6];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+
+      val = half_ptr[fq*num_tiles_k*8 + fk*8 + 7];
+      v_thread_max = max(v_thread_max, abs(__half2float(val)));
+    }
+    offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  }
+
+  block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(v_thread_max, cub::Max());
+  if (threadIdx.x == 0) {
+    V_abs_max = block_max;
+  }
+  __syncthreads();
+
+  v_scale = 7.0f / V_abs_max;
+  offset_V=V_smem_offset_mma;
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++){
+    #pragma unroll
+    for (uint32_t fk = 0; fk < num_tiles_k; fk ++) {
+      // smem_V.ldmatrix_m8n8x4_trans(offset_V, smem_quantized_V[fq]);
+      // offset_V = smem_V.advance_offset_by_column<2>(offset_V, fk);
+      packed = 0;
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 0]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (0 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 1]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (1 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 2]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (2 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 3]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (3 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 4]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (4 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 5]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (5 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 6]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (6 * 4));
+      
+      f_val = __half2float(half_ptr[fq*num_tiles_k*8 + fk*8 + 7]);
+      int4_val = __float2int_rn(f_val * v_scale) & 0xF;
+      packed |= (int4_val << (7 * 4));
+        
+      smem_quantized_V[fq][fk] = packed;
+    }
+    offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  }
+  __syncthreads();
+
   }
 
   // last iter, apply causal mask and out of bound mask
@@ -477,7 +890,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
     }
 
     float RS_f32[num_tiles_q][num_tiles_k][8];
-
+    float thread_max = 0.0000001f;
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
     {
@@ -487,10 +900,11 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
 #pragma unroll
         for (uint32_t k = 0; k < 8; k++)
         {
-            RS_f32[fq][fk][k] = __int2float_rz(RS[fq][fk][k]) * dequant_scale;
+          RS_f32[fq][fk][k] = __int2float_rz(RS[fq][fk][k]) * dequant_scale;
         }
       }
     }
+    
 
     if constexpr (mask_mode == MaskMode::kCausal)
     {
@@ -514,29 +928,89 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kCudaCore>(RS_f32, d);
     }
 
-    uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
-    RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
+    uint32_t RS_int4[num_tiles_q][num_tiles_k][1];
+    __shared__ float RS_max;
+    __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
+    int32_t int4_val;
 
-    if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
-    {
-      accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
+    #pragma unroll
+    for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+      thread_max=max(thread_max,m[fq][0]);
     }
+
+  float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
+  if (threadIdx.x == 0) {
+    RS_max = block_max;
+  }
+  __syncthreads();
+  float s_scale = 15.0f / RS_max;
+
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    #pragma unroll
+    for (uint32_t fk = 0; fk < num_tiles_k; fk++) {
+      RS_int4[fq][fk][0]= 0; 
+      RS_int4[fq][fk][0]= 0; 
+      int4_val = __float2int_rn(RS_f32[fq][fk][0] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (0 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][1] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (1 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][2] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (2 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][3] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (3 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][4] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (4 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][5] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (5 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][6] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (6 * 4));
+
+      int4_val = __float2int_rn(RS_f32[fq][fk][7] * s_scale) & 0xF;
+      RS_int4[fq][fk][0] |= (int4_val << (7 * 4));
+    }
+  }
+    // uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
+    // RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
+
+    // if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
+    // {
+    //   accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
+    // }
 
     // ensure V is ready
     cp_async::wait_group<0>();
     __syncthreads();
-
+    uint32_t zero=0;
     if constexpr (!use_inst_buffer)
     {
-      compute_fp16_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-        smem_V, RS_f16, RO, d, V_smem_offset_mma);
+      compute_int4_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 1>(
+        smem_quantized_V, RS_int4, RO, d, zero);
     }
     else
     {
-      compute_fp16_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-        smem_V, RS_f16, RO, d, V_smem_offset_mma);
+      compute_int4_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 1>(
+        smem_quantized_V, RS_int4, RO, d, zero);
     }
+  
+    float sv_dequant_scale = 1.0f / s_scale  /v_scale;
 
+  #pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    #pragma unroll
+    for (uint32_t fv = 0; fv < num_tiles_v; fv++) {
+      #pragma unroll
+      for (uint32_t k = 0; k < 8; k++) {
+        RO[fq][fv][k] = static_cast<float>(RO[fq][fv][k]) * sv_dequant_scale;
+      }
+    }
+  }
     __syncthreads();
 
   }
@@ -550,21 +1024,21 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
   // {
 
   // convert half to bfloat16
-  if constexpr (std::is_same<DTypeSVAccum, half>::value && std::is_same<DTypeOut, nv_bfloat16>::value)
-  {
-#pragma unroll
-    for (uint32_t fq = 0; fq < num_tiles_q; fq++)
-    {
-#pragma unroll
-      for (uint32_t fv = 0; fv < num_tiles_v; fv++)
-      {
-        ((nv_bfloat162*)RO[fq][fv])[0] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[0]));
-        ((nv_bfloat162*)RO[fq][fv])[1] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[1]));
-        ((nv_bfloat162*)RO[fq][fv])[2] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[2]));
-        ((nv_bfloat162*)RO[fq][fv])[3] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[3]));
-      }
-    }
-  }
+//   if constexpr (std::is_same<DTypeSVAccum, half>::value && std::is_same<DTypeOut, nv_bfloat16>::value)
+//   {
+// #pragma unroll
+//     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+//     {
+// #pragma unroll
+//       for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+//       {
+//         ((nv_bfloat162*)RO[fq][fv])[0] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[0]));
+//         ((nv_bfloat162*)RO[fq][fv])[1] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[1]));
+//         ((nv_bfloat162*)RO[fq][fv])[2] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[2]));
+//         ((nv_bfloat162*)RO[fq][fv])[3] = __float22bfloat162_rn(__half22float2(((half2*)RO[fq][fv])[3]));
+//       }
+//     }
+//   }
 
   // add v_mean
   if constexpr (fuse_v_mean)
@@ -678,7 +1152,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
 }
 
 // tensor_layout 0 for [B, N, H, D], 1 for [B, H, N, D]
-torch::Tensor qk_int8_sv_f16_accum_f32_attn(torch::Tensor query,
+torch::Tensor qk_int8_sv_int4_accum_f32_attn(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -819,7 +1293,7 @@ torch::Tensor qk_int8_sv_f16_accum_f32_attn(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, false, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, false, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, false>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -854,7 +1328,7 @@ torch::Tensor qk_int8_sv_f16_accum_f32_attn(torch::Tensor query,
   return lse;
 }
 
-torch::Tensor qk_int8_sv_f16_accum_f16_attn(torch::Tensor query,
+torch::Tensor qk_int8_sv_int4_accum_f16_attn(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -996,7 +1470,7 @@ torch::Tensor qk_int8_sv_f16_accum_f16_attn(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, false>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -1031,7 +1505,7 @@ torch::Tensor qk_int8_sv_f16_accum_f16_attn(torch::Tensor query,
   return lse;
 }
 
-torch::Tensor qk_int8_sv_f16_accum_f16_attn_inst_buf(torch::Tensor query,
+torch::Tensor qk_int8_sv_int4_accum_f16_attn_inst_buf(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -1173,7 +1647,7 @@ torch::Tensor qk_int8_sv_f16_accum_f16_attn_inst_buf(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, true, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, true, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, false>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -1208,7 +1682,7 @@ torch::Tensor qk_int8_sv_f16_accum_f16_attn_inst_buf(torch::Tensor query,
   return lse;
 }
 
-torch::Tensor qk_int8_sv_f16_accum_f16_fuse_v_mean_attn(torch::Tensor query,
+torch::Tensor qk_int8_sv_int4_accum_f16_fuse_v_mean_attn(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -1359,7 +1833,7 @@ torch::Tensor qk_int8_sv_f16_accum_f16_fuse_v_mean_attn(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, true>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -1394,7 +1868,7 @@ torch::Tensor qk_int8_sv_f16_accum_f16_fuse_v_mean_attn(torch::Tensor query,
   return lse;
 }
 
-torch::Tensor qk_int4_sv_f16_accum_f32_attn(torch::Tensor query,
+torch::Tensor qk_int4_sv_int4_accum_f32_attn(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -1535,7 +2009,7 @@ torch::Tensor qk_int4_sv_f16_accum_f32_attn(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, false, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, false, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, false>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -1570,7 +2044,7 @@ torch::Tensor qk_int4_sv_f16_accum_f32_attn(torch::Tensor query,
   return lse;
 }
 
-torch::Tensor qk_int4_sv_f16_accum_f16_attn(torch::Tensor query,
+torch::Tensor qk_int4_sv_int4_accum_f16_attn(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -1712,7 +2186,7 @@ torch::Tensor qk_int4_sv_f16_accum_f16_attn(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, false>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -1747,7 +2221,7 @@ torch::Tensor qk_int4_sv_f16_accum_f16_attn(torch::Tensor query,
   return lse;
 }
 
-torch::Tensor qk_int4_sv_f16_accum_f16_attn_inst_buf(torch::Tensor query,
+torch::Tensor qk_int4_sv_int4_accum_f16_attn_inst_buf(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -1889,7 +2363,7 @@ torch::Tensor qk_int4_sv_f16_accum_f16_attn_inst_buf(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, true, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), float, true, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, false>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -1924,7 +2398,7 @@ torch::Tensor qk_int4_sv_f16_accum_f16_attn_inst_buf(torch::Tensor query,
   return lse;
 }
 
-torch::Tensor qk_int4_sv_f16_accum_f16_fuse_v_mean_attn(torch::Tensor query,
+torch::Tensor qk_int4_sv_int4_accum_f16_fuse_v_mean_attn(torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
                     torch::Tensor output,
@@ -2075,7 +2549,7 @@ torch::Tensor qk_int4_sv_f16_accum_f16_fuse_v_mean_attn(torch::Tensor query,
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
             size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_f16_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int4_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, true>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);

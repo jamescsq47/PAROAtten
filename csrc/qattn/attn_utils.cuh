@@ -131,7 +131,7 @@ __device__ __forceinline__ void load_global_to_share(T **lane_ptr, uint32_t &sme
       *lane_ptr += (global_to_shared_line_lanes * pack_size);
       smem_offset = smem.advance_offset_by_column<global_to_shared_line_lanes>(smem_offset);
     }
-
+    
     smem_offset = smem.advance_offset_by_row<global_to_shared_copy_lines_per_warp_per_iter>(smem_offset - (smem_iters_row * global_to_shared_line_lanes));
     *lane_ptr += ((global_to_shared_copy_lines_per_warp_per_iter * gmem_stride) - (smem_iters_row * global_to_shared_line_lanes * pack_size));
     base_idx += global_to_shared_copy_lines_per_warp_per_iter;
@@ -159,7 +159,7 @@ __device__ __forceinline__ void load_fp8_V_global_to_share(int8_t **lane_ptr, ui
       *lane_ptr += (global_to_shared_line_lanes * pack_size_fp8);
       smem_offset = smem.advance_offset_by_column<global_to_shared_line_lanes>(smem_offset);
     }
-
+  
     smem_offset = smem.advance_offset_by_row<global_to_shared_copy_lines_per_warp_per_iter>(smem_offset - (smem_iters_row * global_to_shared_line_lanes));
     *lane_ptr += ((global_to_shared_copy_lines_per_warp_per_iter * gmem_stride) - (smem_iters_row * global_to_shared_line_lanes * pack_size_fp8));
   }
@@ -892,3 +892,246 @@ __device__ __forceinline__ void compute_fp8_sv_inst_buf(const smem_t<swizzle_mod
     }
   }
 }
+
+template <uint32_t num_warps_q, uint32_t num_warps_k, 
+          uint32_t num_tiles_q, uint32_t num_tiles_k, uint32_t num_tiles_v,
+          SwizzleMode swizzle_mode, uint32_t stride, uint32_t RS_width=1, typename T, typename DTypeSVAccum>
+__device__ __forceinline__ void compute_int4_sv_permuted(const smem_t<swizzle_mode, stride> &smem_V, T RS_int4[][num_tiles_k][RS_width], DTypeSVAccum RO[][num_tiles_v][8], float d[][2], uint32_t &offset_V)
+{
+  static_assert(sizeof(T) == 4);
+
+  // ! be sure you know what you are doing
+#pragma unroll
+  // for (uint32_t fk = 0; fk < num_tiles_k; fk++)
+  // {
+#pragma unroll
+    for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+    {
+      // load RV
+      uint32_t RV[4];        
+      smem_V.ldmatrix_m8n8x4_trans(offset_V, RV);
+        
+#pragma unroll
+      for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+      {      
+          mma::mma_sync_m16n16k64_row_col_s4s4s32((int32_t*)RO[fq][fv],reinterpret_cast<uint32_t*>(RS_int4[fq]), RV);
+      }
+
+      offset_V = smem_V.advance_offset_by_column<2>(offset_V, fv);
+    }
+    // offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  //}
+  // make offset_V their original value
+  // offset_V -= (16 * num_tiles_k * stride);
+}
+
+template <uint32_t num_warps_q, uint32_t num_warps_k, 
+          uint32_t num_tiles_q, uint32_t num_tiles_k, uint32_t num_tiles_v,
+          SwizzleMode swizzle_mode, uint32_t stride, uint32_t RS_width=1, typename T, typename DTypeSVAccum>
+__device__ __forceinline__ void compute_int4_sv_permuted_inst_buf(const smem_t<swizzle_mode, stride> &smem_V, T RS_int4[][num_tiles_k][RS_width], DTypeSVAccum RO[][num_tiles_v][8], float d[][2], uint32_t &offset_V)
+{
+  static_assert(sizeof(T) == 4);
+  static_assert(std::is_same<DTypeSVAccum, float>::value);
+
+  int32_t RO_inst_buf[num_tiles_q][num_tiles_v][8];
+
+  // ! be sure you know what you are doing
+#pragma unroll
+  for (uint32_t fk = 0; fk < 1; fk++)
+  {
+#pragma unroll
+    for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+    {
+      // load RV
+      uint32_t RV[4];
+      
+      smem_V.ldmatrix_m8n8x4_trans(offset_V, RV);
+#pragma unroll
+      for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+      {
+        {
+          mma::mma_sync_m16n16k64_row_col_s4s4s32<mma::MMAMode::kInit>(RO_inst_buf[fq][fv], reinterpret_cast<uint32_t*>(RS_int4[fq]), RV);
+        }
+      }
+      offset_V = smem_V.advance_offset_by_column<2>(offset_V, fv);
+    }
+    // offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+  }
+
+// #pragma unroll
+//   for (uint32_t fk = 1; fk < num_tiles_k; fk++)
+//   {
+// #pragma unroll
+//     for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+//     {
+//       // load RV
+//       uint32_t RV[4];
+//       smem_V.ldmatrix_m8n8x4_trans(offset_V, RV);
+// #pragma unroll
+//       for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+//       {
+//         {
+//           mma::mma_sync_m16n16k64_row_col_s4s4s32<mma::MMAMode::kInplaceUpdate>((int32_t*)RO_inst_buf[fq][fv],RS_int4[fq][fk], RV);
+//         }
+//       }
+
+//       offset_V = smem_V.advance_offset_by_column<2>(offset_V, fv);
+//     }
+//     offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+//   }
+
+  // accumulate into RO
+#pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+  {
+#pragma unroll
+    for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+    {
+      RO[fq][fv][0] += __int2float_rz(RO_inst_buf[fq][fv][0]);
+      RO[fq][fv][1] += __int2float_rz(RO_inst_buf[fq][fv][1]);
+      RO[fq][fv][2] += __int2float_rz(RO_inst_buf[fq][fv][2]);
+      RO[fq][fv][3] += __int2float_rz(RO_inst_buf[fq][fv][3]);
+      RO[fq][fv][4] += __int2float_rz(RO_inst_buf[fq][fv][4]);
+      RO[fq][fv][5] += __int2float_rz(RO_inst_buf[fq][fv][5]);
+      RO[fq][fv][6] += __int2float_rz(RO_inst_buf[fq][fv][6]);
+      RO[fq][fv][7] += __int2float_rz(RO_inst_buf[fq][fv][7]);     
+    }
+  }
+
+  // make offset_V their original value
+ // offset_V -= (16 * num_tiles_k * stride);
+}
+
+template <SwizzleMode swizzle_mode, uint32_t stride>
+__device__ __forceinline__ uint32_t logical_to_physical(uint32_t logical_idx) {
+  if constexpr (swizzle_mode == SwizzleMode::k128B) {
+      // 每行stride个128B块，每个块8个half元素
+      uint32_t row = logical_idx / (stride * 8);
+      uint32_t col = logical_idx % (stride * 8);
+      // 分散低3位col与低2位row
+      return row * (stride * 8) + ((col / 8) * 8) + ((col % 8) ^ ((row % 4) << 1));
+  } else if constexpr (swizzle_mode == SwizzleMode::k64B) {
+      // 每行stride个64B块，每个块4个half元素
+      uint32_t row = logical_idx / (stride * 4);
+      uint32_t col = logical_idx % (stride * 4);
+      // 分散低2位col与低1位row
+      return row * (stride * 4) + (col ^ (row % 2));
+  } else if constexpr (swizzle_mode == SwizzleMode::k32B) {
+      // 每行stride个32B块，每个块2个half元素
+      uint32_t row = logical_idx / (stride * 2);
+      uint32_t col = logical_idx % (stride * 2);
+      // 直接异或最低位
+      return row * (stride * 2) + (col ^ (row % 1));
+  }
+}
+
+
+
+// template <uint32_t num_warps_q, uint32_t num_warps_k, 
+//           uint32_t num_tiles_q, uint32_t num_tiles_k, uint32_t num_tiles_v,
+//           SwizzleMode swizzle_mode, uint32_t stride, uint32_t RS_width=2, typename T, typename DTypeSVAccum>
+// __device__ __forceinline__ void compute_int8_sv_permuted(const smem_t<swizzle_mode, stride> &smem_V, T RS_int8[][num_tiles_k][RS_width], DTypeSVAccum RO[][num_tiles_v][8], float d[][2], uint32_t &offset_V)
+// {
+//   static_assert(sizeof(T) == 4);
+
+//   // ! be sure you know what you are doing
+// #pragma unroll
+//   for (uint32_t fk = 0; fk < num_tiles_k/2; fk++)
+//   {
+// #pragma unroll
+//     for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+//     {
+//       // load RV
+//       uint32_t RV[4];        
+//       smem_V.ldmatrix_m8n8x4_trans(offset_V, RV);
+        
+// #pragma unroll
+//       for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+//       {      
+//           mma::mma_sync_m16n16k32_row_col_s8s8s32((int32_t*)RO[fq][fv],reinterpret_cast<uint32_t*>(RS_int8[fq]), RV);
+//       }
+
+//       offset_V = smem_V.advance_offset_by_column<2>(offset_V, fv);
+//     }
+//     offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+//   }
+//   // make offset_V their original value
+//   // offset_V -= (16 * num_tiles_k * stride);
+// }
+
+// template <uint32_t num_warps_q, uint32_t num_warps_k, 
+//           uint32_t num_tiles_q, uint32_t num_tiles_k, uint32_t num_tiles_v,
+//           SwizzleMode swizzle_mode, uint32_t stride, uint32_t RS_width=2, typename T, typename DTypeSVAccum>
+// __device__ __forceinline__ void compute_int8_sv_permuted_inst_buf(const smem_t<swizzle_mode, stride> &smem_V, T RS_int8[][num_tiles_k][RS_width], DTypeSVAccum RO[][num_tiles_v][8], float d[][2], uint32_t &offset_V)
+// {
+//   static_assert(sizeof(T) == 4);
+//   static_assert(std::is_same<DTypeSVAccum, float>::value);
+
+//   int32_t RO_inst_buf[num_tiles_q][num_tiles_v][8];
+
+//   // ! be sure you know what you are doing
+// #pragma unroll
+//   for (uint32_t fk = 0; fk < 1; fk++)
+//   {
+// #pragma unroll
+//     for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+//     {
+//       // load RV
+//       uint32_t RV[4];
+      
+//       smem_V.ldmatrix_m8n8x4_trans(offset_V, RV);
+// #pragma unroll
+//       for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+//       {
+//         {
+//           mma::mma_sync_m16n16k32_row_col_s8s8s32<mma::MMAMode::kInit>(RO_inst_buf[fq][fv], reinterpret_cast<uint32_t*>(RS_int8[fq]), RV);
+//         }
+//       }
+//       offset_V = smem_V.advance_offset_by_column<2>(offset_V, fv);
+//     }
+//     offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+//   }
+
+// #pragma unroll
+//   for (uint32_t fk = 1; fk < num_tiles_k/2 ; fk++)
+//   {
+// #pragma unroll
+//     for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+//     {
+//       // load RV
+//       uint32_t RV[4];
+//       smem_V.ldmatrix_m8n8x4_trans(offset_V, RV);
+// #pragma unroll
+//       for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+//       {
+//         {
+//           mma::mma_sync_m16n16k32_row_col_s8s8s32<mma::MMAMode::kInplaceUpdate>((int32_t*)RO_inst_buf[fq][fv],RS_int8[fq][fk], RV);
+//         }
+//       }
+
+//       offset_V = smem_V.advance_offset_by_column<2>(offset_V, fv);
+//     }
+//     offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
+//   }
+
+//   // accumulate into RO
+// #pragma unroll
+//   for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+//   {
+// #pragma unroll
+//     for (uint32_t fv = 0; fv < num_tiles_v; fv++)
+//     {
+//       RO[fq][fv][0] += __int2float_rz(RO_inst_buf[fq][fv][0]);
+//       RO[fq][fv][1] += __int2float_rz(RO_inst_buf[fq][fv][1]);
+//       RO[fq][fv][2] += __int2float_rz(RO_inst_buf[fq][fv][2]);
+//       RO[fq][fv][3] += __int2float_rz(RO_inst_buf[fq][fv][3]);
+//       RO[fq][fv][4] += __int2float_rz(RO_inst_buf[fq][fv][4]);
+//       RO[fq][fv][5] += __int2float_rz(RO_inst_buf[fq][fv][5]);
+//       RO[fq][fv][6] += __int2float_rz(RO_inst_buf[fq][fv][6]);
+//       RO[fq][fv][7] += __int2float_rz(RO_inst_buf[fq][fv][7]);     
+//     }
+//   }
+
+//   // make offset_V their original value
+//  // offset_V -= (16 * num_tiles_k * stride);
+// }
