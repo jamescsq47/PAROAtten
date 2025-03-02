@@ -70,6 +70,22 @@ struct smem_t {
     }
   }
 
+  __device__ __forceinline__ uint32_t logical_to_physical(uint32_t logical_idx) {
+    if constexpr (swizzle_mode == SwizzleMode::k128B) {
+        uint32_t row = logical_idx / (stride * 8);
+        uint32_t col = logical_idx % (stride * 8);
+        return row * (stride * 8) + ((col / 8) * 8 + (col % 8) ^ (row % 8));
+    } else if constexpr (swizzle_mode == SwizzleMode::k64B) {
+        uint32_t row = logical_idx / (stride * 4);
+        uint32_t col = logical_idx % (stride * 4);
+        return row * (stride * 4) + (col ^ (row % 4));
+    } else if constexpr (swizzle_mode == SwizzleMode::k32B) {
+        uint32_t row = logical_idx / (stride * 2);
+        uint32_t col = logical_idx % (stride * 2);
+        return row * (stride * 2) + (col ^ (row % 2));
+    }
+}
+
   /*!
    * \brief Set the base pointer.
    */

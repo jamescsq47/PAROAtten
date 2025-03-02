@@ -151,6 +151,8 @@ if HAS_SM80 or HAS_SM86 or HAS_SM89 or HAS_SM90:
         sources=[
             "csrc/qattn/pybind_sm80.cpp",
             "csrc/qattn/qk_int_sv_f16_cuda_sm80.cu",
+            "csrc/qattn/qk_int_sv_int4_cuda_sm80.cu",
+            #"csrc/qattn/qk_int_sv_int8_cuda_sm80.cu",
         ],
         extra_compile_args={
             "cxx": CXX_FLAGS,
