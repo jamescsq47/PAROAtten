@@ -117,8 +117,8 @@ if not compute_capabilities:
     raise RuntimeError("No GPUs found. Please specify the target GPU architectures or build on a machine with GPUs.")
 
 # Validate the NVCC CUDA version.
-if nvcc_cuda_version < Version("12.0"):
-    raise RuntimeError("CUDA 12.0 or higher is required to build the package.")
+# if nvcc_cuda_version < Version("12.0"):
+#     raise RuntimeError("CUDA 12.0 or higher is required to build the package.")
 if nvcc_cuda_version < Version("12.4") and any(cc.startswith("8.9") for cc in compute_capabilities):
     raise RuntimeError(
         "CUDA 12.4 or higher is required for compute capability 8.9.")
@@ -151,8 +151,8 @@ if HAS_SM80 or HAS_SM86 or HAS_SM89 or HAS_SM90:
         sources=[
             "csrc/qattn/pybind_sm80.cpp",
             "csrc/qattn/qk_int_sv_f16_cuda_sm80.cu",
-            "csrc/qattn/qk_int_sv_int4_cuda_sm80.cu",
-            #"csrc/qattn/qk_int_sv_int8_cuda_sm80.cu",
+            # "csrc/qattn/qk_int_sv_int4_cuda_sm80.cu",
+            "csrc/qattn/qk_int_sv_int8_cuda_sm80.cu",
         ],
         extra_compile_args={
             "cxx": CXX_FLAGS,

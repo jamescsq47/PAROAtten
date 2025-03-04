@@ -895,34 +895,31 @@ __device__ __forceinline__ void compute_fp8_sv_inst_buf(const smem_t<swizzle_mod
 
 template <uint32_t num_warps_q, uint32_t num_warps_k, 
           uint32_t num_tiles_q, uint32_t num_tiles_k, uint32_t num_tiles_v,
-          SwizzleMode swizzle_mode, uint32_t stride, uint32_t RS_width=1, typename T, typename DTypeSVAccum>
-__device__ __forceinline__ void compute_int4_sv_permuted(const smem_t<swizzle_mode, stride> &smem_V, T RS_int4[][num_tiles_k][RS_width], DTypeSVAccum RO[][num_tiles_v][8], float d[][2], uint32_t &offset_V)
+          SwizzleMode swizzle_mode, uint32_t stride, typename DTypeSVAccum>
+__device__ __forceinline__ void compute_int8_sv(const smem_t<swizzle_mode, stride> &smem_V, uint32_t RS_int8[][num_tiles_k / 2][4], DTypeSVAccum RO[][num_tiles_v][8], float d[][2])
 {
-  static_assert(sizeof(T) == 4);
-
+  uint32_t smem_V_row_base = get_lane_id() % 8 + (get_lane_id() / 16) * 8;
+  uint32_t smem_V_col_base = (get_lane_id() / 8) % 2;
   // ! be sure you know what you are doing
 #pragma unroll
-  // for (uint32_t fk = 0; fk < num_tiles_k; fk++)
-  // {
+  for (uint32_t fk = 0; fk < num_tiles_k / 2; fk++)
+  {
+    uint32_t offset_V = smem_V.get_permuted_offset(smem_V_row_base, smem_V_col_base + fk * 2);
 #pragma unroll
     for (uint32_t fv = 0; fv < num_tiles_v; fv++)
     {
       // load RV
       uint32_t RV[4];        
-      smem_V.ldmatrix_m8n8x4_trans(offset_V, RV);
+      smem_V.ldmatrix_m8n8x4(offset_V, RV);
         
 #pragma unroll
       for (uint32_t fq = 0; fq < num_tiles_q; fq++)
       {      
-          mma::mma_sync_m16n16k64_row_col_s4s4s32((int32_t*)RO[fq][fv],reinterpret_cast<uint32_t*>(RS_int4[fq]), RV);
+          mma::mma_sync_m16n16k32_row_col_s8s8s32((int32_t*)RO[fq][fv],reinterpret_cast<uint32_t*>(RS_int8[fq][fk]), RV);
       }
-
-      offset_V = smem_V.advance_offset_by_column<2>(offset_V, fv);
+      offset_V = smem_V.advance_offset_by_row<16>(offset_V);
     }
-    // offset_V = smem_V.advance_offset_by_row<16>(offset_V - (2 * num_tiles_v));
-  //}
-  // make offset_V their original value
-  // offset_V -= (16 * num_tiles_k * stride);
+  }
 }
 
 template <uint32_t num_warps_q, uint32_t num_warps_k, 

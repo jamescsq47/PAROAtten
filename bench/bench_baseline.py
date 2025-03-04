@@ -35,7 +35,7 @@ for seq_len in {1024, 2048, 4096, 8192, 16384, 32768}:
     for i in range(5): sdpa(q, k, v, is_causal=is_causal)
     torch.cuda.synchronize()
     _, time = benchmark_forward(sdpa, q, k, v, is_causal=is_causal, repeats=100, verbose=False, desc='Triton')
-    print(f'{seq_len} flops:{flops/time.mean*1e-12}')
+    print(f'{seq_len} flops:{flops/time.mean*1e-12} latency:{time.mean*1e3}')
 
 is_causal = True
 print(f"is_causal: {is_causal}")
@@ -47,4 +47,4 @@ for seq_len in {1024, 2048, 4096, 8192, 16384, 32768}:
     for i in range(5): sdpa(q, k, v, is_causal=is_causal)
     torch.cuda.synchronize()
     _, time = benchmark_forward(sdpa, q, k, v, is_causal=is_causal, repeats=100, verbose=False, desc='Triton')
-    print(f'{seq_len} flops:{flops/time.mean*1e-12}')
+    print(f'{seq_len} flops:{flops/time.mean*1e-12} latency:{time.mean*1e3}')
