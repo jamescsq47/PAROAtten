@@ -39,4 +39,4 @@ for seq_len in {1024, 2048, 4096, 8192, 16384, 32768}:
     for i in range(5): flash_attn_func_v3(q, k, v, causal=is_causal)
     torch.cuda.synchronize()
     _, time = benchmark_forward(flash_attn_func_v3, q, k, v, causal=is_causal, repeats=100, verbose=False, desc='Triton')
-    print(f'{seq_len} flops:{flops/time.mean*1e-12}')
+    print(f'{seq_len} flops:{flops/time.mean*1e-12} latency:{time.mean}')
