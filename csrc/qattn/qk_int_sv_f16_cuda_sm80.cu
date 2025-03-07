@@ -971,7 +971,7 @@ torch::Tensor qk_int8_sv_f16_accum_f16_attn(torch::Tensor query,
         DISPATCH_RETURN_LSE(return_lse, RETURN_LSE, {
           DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(output_dtype, DTypeOut, {
               
-            constexpr int CTA_Q = 128;
+            constexpr int CTA_Q = 64;
             constexpr int CTA_K = 64;
             constexpr int WARP_Q = 32;
             constexpr int WARP_K = 64;

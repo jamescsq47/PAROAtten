@@ -78,7 +78,8 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
 
   constexpr uint32_t QK_SMEM_STRIDE = (DTypeQK == DataType::kInt8) ? (head_dim) : (head_dim / 2);
   constexpr uint32_t O_SMEM_STRIDE = head_dim;
-  constexpr uint32_t V_SMEM_STRIDE = head_dim;
+  //                       for fp16: head_dim
+  constexpr uint32_t V_SMEM_STRIDE = CTA_K;
 
   extern __shared__ int8_t smem[];
 
@@ -246,6 +247,10 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
     }
   }
 
+  // uint32_t RS_int8[num_tiles_q][num_tiles_k / 2][4];
+  // __shared__ float RS_max;
+  // __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
+
   // load K with predicate
   load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
     &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K, K_load_idx_lane_base, kv_len);
@@ -324,51 +329,25 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
 
     // quantize S to INT8
     uint32_t RS_int8[num_tiles_q][num_tiles_k / 2][4];
-    __shared__ float RS_max;
-    __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
-    int32_t int8_val=0;
+    // __shared__ float RS_max;
+    // __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
+    // int32_t int8_val=0;
 
-  #pragma unroll
-  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
-    thread_max=max(thread_max,m[fq][0]);
-  }
+    // #pragma unroll
+    // for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    //   thread_max=max(thread_max,m[fq][0]);
+    // }
 
-  float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
-  if (threadIdx.x == 0) {
-    RS_max = block_max;
-  }
-  __syncthreads();
-  float s_scale = 127.0f / RS_max;
-
-  #pragma unroll
-  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
-    #pragma unroll
-    for (uint32_t fk = 0; fk < num_tiles_k/2; fk++) {
-      RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][0] * s_scale) << (0 * 8));
-      RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][1] * s_scale) << (1 * 8));
-      RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][2] * s_scale) << (2 * 8));
-      RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][3] * s_scale) << (3 * 8));
-
-      RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][4] * s_scale) << (0 * 8));
-      RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][5] * s_scale) << (1 * 8));
-      RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][6] * s_scale) << (2 * 8));
-      RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][7] * s_scale) << (3 * 8));
-
-      RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][0] * s_scale) << (0 * 8));
-      RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][1] * s_scale) << (1 * 8));
-      RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][2] * s_scale) << (2 * 8));
-      RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][3] * s_scale) << (3 * 8));
-
-      RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][4] * s_scale) << (0 * 8));
-      RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][5] * s_scale) << (1 * 8));
-      RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][6] * s_scale) << (2 * 8));
-      RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][7] * s_scale) << (3 * 8));
-    }
-  }
-
+    // float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
+    // if (threadIdx.x == 0) {
+    //   RS_max = block_max;
+    // }
+    // __syncthreads();
+    // float s_scale = 127.0f / RS_max;
+    RS_32_to_s8<num_tiles_q, num_tiles_k>(RS_f32, RS_int8, (127.0f));
+      
     uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
     RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
-
     if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
     {
       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
@@ -400,19 +379,19 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
     // }
 
     // float sv_dequant_scale = 1.0 / s_scale /v_scale;
-    float sv_dequant_scale = 1.0 / s_scale;
+    float sv_dequant_scale = 1.0 / 127.0f;
 
-  //Dequantization
-  #pragma unroll
-  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    //Dequantization
     #pragma unroll
-    for (uint32_t fv = 0; fv < num_tiles_v; fv++) {
+    for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
       #pragma unroll
-      for (uint32_t k = 0; k < 8; k++) {
-        RO[fq][fv][k] = static_cast<float>(RO[fq][fv][k]) * sv_dequant_scale;
+      for (uint32_t fv = 0; fv < num_tiles_v; fv++) {
+        #pragma unroll
+        for (uint32_t k = 0; k < 8; k++) {
+          RO[fq][fv][k] = static_cast<float>(RO[fq][fv][k]) * sv_dequant_scale;
+        }
       }
     }
-  }
 
     __syncthreads();
     // load V
@@ -482,47 +461,22 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
 
     // quantize S to INT8
     uint32_t RS_int8[num_tiles_q][num_tiles_k / 2][4];
-    __shared__ float RS_max;
-    __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
-    int32_t int8_val=0;
+    // __shared__ float RS_max;
+    // __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
+    // int32_t int8_val=0;
 
-    #pragma unroll
-    for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
-      thread_max=max(thread_max,m[fq][0]);
-    }
+    // #pragma unroll
+    // for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    //   thread_max=max(thread_max,m[fq][0]);
+    // }
 
-    float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
-    if (threadIdx.x == 0) {
-      RS_max = block_max;
-    }
-    __syncthreads();
-    float s_scale = 127.0f / RS_max;
-
-    #pragma unroll
-    for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
-      #pragma unroll
-      for (uint32_t fk = 0; fk < num_tiles_k/2; fk++) {
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][0] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][1] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][2] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][3] * s_scale) << (3 * 8));
-
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][4] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][5] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][6] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][7] * s_scale) << (3 * 8));
-
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][0] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][1] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][2] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][3] * s_scale) << (3 * 8));
-
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][4] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][5] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][6] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][7] * s_scale) << (3 * 8));
-      }
-    }
+    // float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
+    // if (threadIdx.x == 0) {
+    //   RS_max = block_max;
+    // }
+    // __syncthreads();
+    // float s_scale = 127.0f / RS_max;
+    RS_32_to_s8<num_tiles_q, num_tiles_k>(RS_f32, RS_int8, 127.0f);
 
     uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
     RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
@@ -557,7 +511,7 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
     //     smem_quantized_V, RS_int4, RO, d, zero);
     // }
 
-    float sv_dequant_scale = 1.0 / s_scale;
+    float sv_dequant_scale = 1.0 / 127.0f;
 
   #pragma unroll
   for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
@@ -637,51 +591,26 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
 
     // quantize S to INT8
     uint32_t RS_int8[num_tiles_q][num_tiles_k / 2][4];
-    __shared__ float RS_max;
-    __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
-    int32_t int8_val=0;
+    // __shared__ float RS_max;
+    // __shared__ typename cub::BlockReduce<float, 64>::TempStorage temp_storage;
+    // int32_t int8_val=0;
 
-    #pragma unroll
-    for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
-      thread_max=max(thread_max,m[fq][0]);
-    }
+    // #pragma unroll
+    // for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    //   thread_max=max(thread_max,m[fq][0]);
+    // }
 
-    float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
-    if (threadIdx.x == 0) {
-      RS_max = block_max;
-    }
-    __syncthreads();
-    float s_scale = 127.0f / RS_max;
-
-    #pragma unroll
-    for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
-      #pragma unroll
-      for (uint32_t fk = 0; fk < num_tiles_k/2; fk++) {
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][0] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][1] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][2] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][0] |= (float_to_int8_rn(RS_f32[fq][fk * 2][3] * s_scale) << (3 * 8));
-
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][4] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][5] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][6] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][1] |= (float_to_int8_rn(RS_f32[fq][fk * 2][7] * s_scale) << (3 * 8));
-
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][0] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][1] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][2] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][2] |= (float_to_int8_rn(RS_f32[fq][fk * 2][3] * s_scale) << (3 * 8));
-
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][4] * s_scale) << (0 * 8));
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][5] * s_scale) << (1 * 8));
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][6] * s_scale) << (2 * 8));
-        RS_int8[fq][fk][3] |= (float_to_int8_rn(RS_f32[fq][fk * 2][7] * s_scale) << (3 * 8));
-      }
-    }
+    // float block_max = cub::BlockReduce<float, 64>(temp_storage).Reduce(thread_max, cub::Max());
+    // if (threadIdx.x == 0) {
+    //   RS_max = block_max;
+    // }
+    // __syncthreads();
+    // float s_scale = 127.0f / RS_max;
+    RS_32_to_s8<num_tiles_q, num_tiles_k>(RS_f32, RS_int8, 127.0f);
+    
 
     uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
     RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
-
     if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
     {
       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
@@ -702,7 +631,7 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
     //     smem_quantized_V, RS_int4, RO, d, zero);
     // }
   
-    float sv_dequant_scale = 1.0f / s_scale;
+    float sv_dequant_scale = 1.0f / 127.0f;
 
   #pragma unroll
   for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
@@ -1175,9 +1104,9 @@ torch::Tensor qk_int8_sv_int8_accum_f16_attn(torch::Tensor query,
             }
 
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
-            size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
+            size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t), CTA_Q * HEAD_DIM * sizeof(half));
             
-            auto kernel_func = qk_int_sv_int8_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
+            auto kernel_func = qk_int_sv_int8_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt8, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kCudaCore, 
                                                           mask_mode, RETURN_LSE, false>;
 
             cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_max);
@@ -1899,7 +1828,7 @@ torch::Tensor qk_int4_sv_int8_accum_f16_attn(torch::Tensor query,
             }
 
             //                                     smem_Q                                     smem_K                            smem_V                     smem_O
-            size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t), CTA_Q * HEAD_DIM * sizeof(half));
+            size_t smem_max = std::max(CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(half), CTA_Q * HEAD_DIM * sizeof(half));
             
             auto kernel_func = qk_int_sv_int8_attn_kernel<CTA_Q, CTA_K, WARP_Q, WARP_K, HEAD_DIM, DataType::kInt4, static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN), half, false, DTypeOut, ComputeUnit::kTensorCore, 
                                                           mask_mode, RETURN_LSE, false>;
