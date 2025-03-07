@@ -52,7 +52,7 @@ elif args.pv_accum_dtype == 'fp16':
 
 _qk_quant_gran = 3 if args.quant_gran == 'per_thread' else 2
 
-for sparse_ratio in {0.3, 0.5}:
+for sparse_ratio in {1.0}:
     # print(f"sparse_ratio: {sparse_ratio}")
     is_causal = False
     _is_causal = 1 if is_causal else 0

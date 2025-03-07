@@ -140,3 +140,23 @@ __device__ __forceinline__ int8_t float_to_int8_rn(float x)
     asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
     return reinterpret_cast<const int8_t&>(dst);
 }
+
+__device__ __forceinline__ uint32_t floatx4_to_int8x4_rn(float4 x) {
+    uint32_t dst;
+    asm volatile(
+        "{\n\t"
+        "  .reg .b32 t;\n\t"
+        "  cvt.rni.sat.s8.f32 t, %1;\n\t"
+        "  mov.b32 %0, t;\n\t"
+        "  cvt.rni.sat.s8.f32 t, %2;\n\t"
+        "  bfi.b32 %0, t, %0, 8, 8;\n\t"
+        "  cvt.rni.sat.s8.f32 t, %3;\n\t"
+        "  bfi.b32 %0, t, %0, 16, 8;\n\t"
+        "  cvt.rni.sat.s8.f32 t, %4;\n\t"
+        "  bfi.b32 %0, t, %0, 24, 8;\n\t"
+        "}"
+        : "=r"(dst)
+        : "f"(x.x), "f"(x.y), "f"(x.z), "f"(x.w)
+    );
+    return dst;
+}

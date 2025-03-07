@@ -493,6 +493,41 @@ __device__ __forceinline__ void RS_32_to_8(float RS[][num_tiles_k][8], uint32_t 
 }
 
 template <uint32_t num_tiles_q, uint32_t num_tiles_k>
+__device__ __forceinline__ void RS_32_to_s8(float RS[][num_tiles_k][8], uint32_t RS_int8[][num_tiles_k / 2][4], float s_scale)
+{
+#pragma unroll
+  for (uint32_t fq = 0; fq < num_tiles_q; fq++) {
+    #pragma unroll
+    for (uint32_t fk = 0; fk < num_tiles_k/2; fk++) {
+
+      // int even = fk * 2;
+      // int odd = fk * 2 + 1;
+      float *rs = &RS[fq][fk * 2][0];
+
+      RS_int8[fq][fk][0] = (__float2int_rz(rs[0] * s_scale) << 24);
+      RS_int8[fq][fk][0] += (__float2int_rz(rs[1] * s_scale) << 16);
+      RS_int8[fq][fk][0] += (__float2int_rz(rs[2] * s_scale) << 8);
+      RS_int8[fq][fk][0] += (__float2int_rz(rs[3] * s_scale));
+
+      RS_int8[fq][fk][1] = (__float2int_rz(rs[4] * s_scale) << 24);
+      RS_int8[fq][fk][1] += (__float2int_rz(rs[5] * s_scale) << 16);
+      RS_int8[fq][fk][1] += (__float2int_rz(rs[6] * s_scale) << 8);
+      RS_int8[fq][fk][1] += (__float2int_rz(rs[7] * s_scale));
+
+      RS_int8[fq][fk][2] = (__float2int_rz(rs[8] * s_scale) << 24);
+      RS_int8[fq][fk][2] += (__float2int_rz(rs[9] * s_scale) << 16);
+      RS_int8[fq][fk][2] += (__float2int_rz(rs[10] * s_scale) << 8);
+      RS_int8[fq][fk][2] += (__float2int_rz(rs[11] * s_scale));
+
+      RS_int8[fq][fk][3] = (__float2int_rz(rs[12] * s_scale) << 24);
+      RS_int8[fq][fk][3] += (__float2int_rz(rs[13] * s_scale) << 16);
+      RS_int8[fq][fk][3] += (__float2int_rz(rs[14] * s_scale) << 8);
+      RS_int8[fq][fk][3] += (__float2int_rz(rs[15] * s_scale));
+    }
+  }
+}
+
+template <uint32_t num_tiles_q, uint32_t num_tiles_k>
 __device__ __forceinline__ void RS_16_to_8(uint32_t RS[][num_tiles_k][4], uint32_t RS_8[][num_tiles_k / 2][4])
 {
 #pragma unroll
