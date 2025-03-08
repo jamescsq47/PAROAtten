@@ -1,19 +1,3 @@
-"""
-Copyright (c) 2024 by SageAttention team.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
 import os
 import subprocess
 from packaging.version import parse, Version
@@ -30,7 +14,7 @@ HAS_SM89 = False
 HAS_SM90 = False
 
 # Supported NVIDIA GPU architectures.
-SUPPORTED_ARCHS = {"8.0", "8.6", "8.9", "9.0"}
+SUPPORTED_ARCHS = {"8.0"}
 
 # Compiler flags.
 CXX_FLAGS = ["-g", "-O3", "-fopenmp", "-lgomp", "-std=c++17", "-DENABLE_BF16"]
@@ -147,7 +131,7 @@ ext_modules = []
 
 if HAS_SM80 or HAS_SM86 or HAS_SM89 or HAS_SM90:
     qattn_extension = CUDAExtension(
-        name="sageattention._qattn_sm80",
+        name="paroattention._qattn_sm80",
         sources=[
             "csrc/qattn/pybind_sm80.cpp",
             "csrc/qattn/qk_int_sv_f16_cuda_sm80.cu",
@@ -161,39 +145,10 @@ if HAS_SM80 or HAS_SM86 or HAS_SM89 or HAS_SM90:
     )
     ext_modules.append(qattn_extension)
 
-if HAS_SM89:
-    qattn_extension = CUDAExtension(
-        name="sageattention._qattn_sm89",
-        sources=[
-            "csrc/qattn/pybind_sm89.cpp",
-            "csrc/qattn/qk_int_sv_f8_cuda_sm89.cu",
-        ],
-        extra_compile_args={
-            "cxx": CXX_FLAGS,
-            "nvcc": NVCC_FLAGS,
-        },
-    )
-    ext_modules.append(qattn_extension)
-
-if HAS_SM90:
-    qattn_extension = CUDAExtension(
-        name="sageattention._qattn_sm90",
-        sources=[
-            "csrc/qattn/pybind_sm90.cpp",
-            "csrc/qattn/qk_int_sv_f8_cuda_sm90.cu",
-        ],
-        extra_compile_args={
-            "cxx": CXX_FLAGS,
-            "nvcc": NVCC_FLAGS,
-        },
-        extra_link_args=['-lcuda'],
-    )
-    ext_modules.append(qattn_extension)
-
 # Fused kernels.
 fused_extension = CUDAExtension(
-    name="sageattention._fused",
-    sources=["csrc/fused/pybind.cpp", "csrc/fused/fused.cu"],
+    name="paroattention._rope",
+    sources=["csrc/rope/pybind.cpp", "csrc/rope/rope.cu"],
     extra_compile_args={
         "cxx": CXX_FLAGS,
         "nvcc": NVCC_FLAGS,
@@ -202,14 +157,12 @@ fused_extension = CUDAExtension(
 ext_modules.append(fused_extension)
 
 setup(
-    name='sageattention', 
-    version='2.1.0',  
-    author='SageAttention team',
-    license='Apache 2.0 License',  
-    description='Accurate and efficient plug-and-play low-bit attention.',  
+    name='paroattention', 
+    version='0.0.1',  
+    author='PAROAttention team',
+    description='PAROAttention code adapted from SageAttention.',  
     long_description=open('README.md').read(),  
     long_description_content_type='text/markdown', 
-    url='https://github.com/thu-ml/SageAttention', 
     packages=find_packages(),
     python_requires='>=3.9',
     ext_modules=ext_modules,

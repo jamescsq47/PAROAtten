@@ -1,0 +1,12 @@
+LICENSE
+README.md
+setup.py
+csrc/qattn/pybind_sm80.cpp
+csrc/qattn/qk_int_sv_f16_cuda_sm80.cu
+csrc/qattn/qk_int_sv_int8_cuda_sm80.cu
+csrc/rope/pybind.cpp
+csrc/rope/rope.cu
+paroattention.egg-info/PKG-INFO
+paroattention.egg-info/SOURCES.txt
+paroattention.egg-info/dependency_links.txt
+paroattention.egg-info/top_level.txt
