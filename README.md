@@ -1,5 +1,5 @@
 # PAROAttention (Hardware code)
-This package includes PAROAttention codes with quantization and sparsity implementation. We build PAROAttention based on the [SageAttn V2](https://github.com/thu-ml/SageAttention) codebased, and further integrate the tailored designs for $PV^{T}$ INT8 quantization and block-wise sparsity. Additionally, this package also includes the RoPE kernel with fused permutation mentioned in our paper. 
+This package includes PAROAttention codes with quantization and sparsity implementation. We build PAROAttention based on the [SageAttn V2](https://github.com/thu-ml/SageAttention) code, and further integrate the tailored designs for $PV^{T}$ INT8 quantization and block-wise sparsity. Additionally, this package also includes the RoPE kernel with fused permutation mentioned in our paper. 
 
 ## Installation
 - `python >= 3.9`, `torch >= 2.3.0`, `CUDA >= 11.8`
