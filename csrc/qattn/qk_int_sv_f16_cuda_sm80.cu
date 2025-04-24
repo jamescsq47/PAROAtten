@@ -263,8 +263,13 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
 #pragma unroll
   for (uint32_t iter = 1; iter < num_iterations - 1; iter++)
   {
-    if (sparse[blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y+iter] == false)
+    if (sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+iter-1] == false)
     {
+      // let the first thread print the idx
+      if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0)
+      {
+        printf("batch:%d, head:%d, row %d, column:%d\n", blockIdx.z, blockIdx.y, blockIdx.x, iter-1);
+      }
       continue;
     }
   
@@ -360,7 +365,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
   }
   
   // second last iter, apply causal mask
-  if (num_iterations > 1 && sparse[blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y+num_iterations-1] == true)
+  if (num_iterations > 1 && sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+num_iterations-1-1] == true)
   {
     // ensure K is ready
     cp_async::wait_group<1>();
@@ -458,7 +463,7 @@ __global__ void qk_int_sv_f16_attn_kernel(int8_t *__restrict__ Q, int8_t *__rest
   }
 
   // last iter, apply causal mask and out of bound mask
-  if(sparse[blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y+num_iterations] == true)
+  if(sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+num_iterations-1] == true)
   {
     // ensure K is ready
     cp_async::wait_group<1>();

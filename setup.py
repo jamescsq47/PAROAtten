@@ -146,9 +146,20 @@ if HAS_SM80 or HAS_SM86 or HAS_SM89 or HAS_SM90:
     ext_modules.append(qattn_extension)
 
 # Fused kernels.
-fused_extension = CUDAExtension(
+rope_extension = CUDAExtension(
     name="paroattention._rope",
     sources=["csrc/rope/pybind.cpp", "csrc/rope/rope.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(rope_extension)
+
+# Fused kernels.
+fused_extension = CUDAExtension(
+    name="paroattention._fused",
+    sources=["csrc/fused/pybind.cpp", "csrc/fused/fused.cu"],
     extra_compile_args={
         "cxx": CXX_FLAGS,
         "nvcc": NVCC_FLAGS,
