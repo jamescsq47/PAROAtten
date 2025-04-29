@@ -41,7 +41,7 @@ sparse = torch.load("/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/cal
 sparse = sparse[0,1,:,:,:]
 sparse = sparse.to(torch.bool).cuda() 
 print(sparse.shape) #torch.Size([48, 278, 278]) one: calculate; zero: skip
-# sparse = torch.ones((48, 278, 278), dtype=torch.bool).cuda()  # 全True初始化
+all_one_sparse = torch.ones((48, 278, 278), dtype=torch.bool).cuda()  # 全True初始化
 # new_sparse[:, 4:278, 4:278] = sparse
 # new_sparse = new_sparse.view(-1)
 # print(new_sparse.shape) #torch.Size([48, 279, 279]) 
@@ -108,80 +108,84 @@ seq_len = q.shape[2]
 head = q.shape[1]
 headdim = q.shape[3]
 o_int8 = torch.empty(batch, head, seq_len, headdim, dtype=torch.float16).cuda()
+dense_o_int8 = torch.empty(batch, head, seq_len, headdim, dtype=torch.float16).cuda()
 sm_scale = 1 / (headdim ** 0.5)
 is_causal = False
 _is_causal = 1 if is_causal else 0
 for i in range(2): 
     kernel_int8(q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)
     torch.cuda.synchronize()
+for i in range(2): 
+    kernel_int8(q_int8, k_int8, v, dense_o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse)
+    torch.cuda.synchronize()
 # _, time_int8 = benchmark_forward(kernel_int8, q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
 print(o_int8) # torch.Size([1, 48, 17776, 64])
-print(out) # torch.Size([1, 48, 17776, 64])
-diff = torch.abs(o_int8 - out)
+print(dense_o_int8) # torch.Size([1, 48, 17776, 64])
+diff = torch.abs(o_int8 - dense_o_int8)
 mean_diff = torch.mean(diff)
 print(f"Mean difference: {mean_diff.item()}")
 
 # 提取第 12 个 head 的差值切片
-head_index = 12
-diff_head_12 = diff[0, head_index, :, :].cpu().numpy()  # 提取第 12 个 head 的数据并转为 NumPy 数组
+# head_index = 12
+# diff_head_12 = diff[0, head_index, :, :].cpu().numpy()  # 提取第 12 个 head 的数据并转为 NumPy 数组
 
-# 绘制差值的二维图像
-plt.figure(figsize=(12, 6))
-plt.imshow(diff_head_12, cmap="viridis", interpolation="nearest", aspect="auto")
-plt.title(f"Absolute Difference for Head {head_index}")
-plt.colorbar(label="Absolute Difference Value")
-plt.xlabel("Head Dimension (64)")
-plt.ylabel("Sequence Length (17776)")
+# # 绘制差值的二维图像
+# plt.figure(figsize=(12, 6))
+# plt.imshow(diff_head_12, cmap="viridis", interpolation="nearest", aspect="auto")
+# plt.title(f"Absolute Difference for Head {head_index}")
+# plt.colorbar(label="Absolute Difference Value")
+# plt.xlabel("Head Dimension (64)")
+# plt.ylabel("Sequence Length (17776)")
 
-# 保存图片到当前目录
-output_path = f"absolute_difference_head_{head_index}.png"
-plt.savefig(output_path)
-print(f"Visualization saved to {output_path}")
+# # 保存图片到当前目录
+# output_path = f"absolute_difference_head_{head_index}.png"
+# plt.savefig(output_path)
+# print(f"Visualization saved to {output_path}")
 
 
 # 在 batch 和 head 维度（第 0 和第 1 维）取最大值
-max_diff_across_batch_head = torch.max(diff, dim=0).values  # 先对 batch 维度取最大值
-max_diff_across_batch_head = torch.max(max_diff_across_batch_head, dim=0).values  # 再对 head 维度取最大值
+# max_diff_across_batch_head = torch.max(diff, dim=0).values  # 先对 batch 维度取最大值
+# max_diff_across_batch_head = torch.max(max_diff_across_batch_head, dim=0).values  # 再对 head 维度取最大值
 
-# max_diff_across_batch_head 的形状为 [17776, 64]
-max_diff_data = max_diff_across_batch_head.cpu().numpy()
+# # max_diff_across_batch_head 的形状为 [17776, 64]
+# max_diff_data = max_diff_across_batch_head.cpu().numpy()
 
-# 绘制二维图像
-plt.figure(figsize=(12, 6))
-plt.imshow(max_diff_data, cmap="viridis", interpolation="nearest", aspect="auto")
-plt.title("Maximum Difference Across Batch and Head Dimensions")
-plt.colorbar(label="Maximum Difference Value")
-plt.xlabel("Head Dimension (64)")
-plt.ylabel("Sequence Length (17776)")
+# # 绘制二维图像
+# plt.figure(figsize=(12, 6))
+# plt.imshow(max_diff_data, cmap="viridis", interpolation="nearest", aspect="auto")
+# plt.title("Maximum Difference Across Batch and Head Dimensions")
+# plt.colorbar(label="Maximum Difference Value")
+# plt.xlabel("Head Dimension (64)")
+# plt.ylabel("Sequence Length (17776)")
 
-# 保存图片到当前目录
-output_path = "max_diff_across_batch_head.png"
-plt.savefig(output_path)
-print(f"Visualization saved to {output_path}")
+# # 保存图片到当前目录
+# output_path = "max_diff_across_batch_head.png"
+# plt.savefig(output_path)
+# print(f"Visualization saved to {output_path}")
 
 
-print(torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3))
-print(torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3).shape)
-print(torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3).mean())
+print(torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3))
+print(torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3).shape)
+print(torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3).mean())
 
 # 假设 cosine_similarity 已经计算完成
-cos_sim = torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3)  # 结果大小为 [1, 48, 17762]
-
+cos_sim = torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3)  # 结果大小为 [1, 48, 17762]
+print(torch.mean(cos_sim))
 # 去掉 batch 维度，形状变为 [48, 17762]
-cos_sim_data = cos_sim.squeeze(0).cpu().numpy()
+# cos_sim_data = cos_sim.squeeze(0).cpu().numpy()
 
-# 绘制二维图像
-plt.figure(figsize=(12, 6))
-plt.imshow(cos_sim_data, cmap="viridis", interpolation="nearest", aspect="auto")
-plt.title("Cosine Similarity Across Heads and Sequence Length")
-plt.colorbar(label="Cosine Similarity")
-plt.xlabel("Sequence Length (17762)")
-plt.ylabel("Head Index (48)")
+# # 绘制二维图像
+# plt.figure(figsize=(12, 6))
+# plt.imshow(cos_sim_data, cmap="viridis", interpolation="nearest", aspect="auto")
+# plt.title("Cosine Similarity Across Heads and Sequence Length")
+# plt.colorbar(label="Cosine Similarity")
+# plt.xlabel("Sequence Length (17762)")
+# plt.ylabel("Head Index (48)")
 
-# 保存图片到当前目录
-output_path = "cosine_similarity_visualization.png"
-plt.savefig(output_path)
-print(f"Visualization saved to {output_path}")
-# print(f'seq len: {seq_len}, sparse ratio: {sparse_ratio}, flops: {flops*1e-12/time_int8.mean}, latency:{time_int8.mean*1e3}')
+# # 保存图片到当前目录
+# output_path = "cosine_similarity_visualization.png"
+# plt.savefig(output_path)
+# print(f"Visualization saved to {output_path}")
+# # print(f'seq len: {seq_len}, sparse ratio: {sparse_ratio}, flops: {flops*1e-12/time_int8.mean}, latency:{time_int8.mean*1e3}')
        
 
