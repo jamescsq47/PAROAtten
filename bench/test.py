@@ -78,9 +78,9 @@ for sparse_ratio in {0.2, 0.3, 0.5}:
         o_int4 = torch.empty(batch, seq_len, head, headdim, dtype=torch.float16).cuda()
         o_int8 = torch.empty(batch, seq_len, head, headdim, dtype=torch.float16).cuda()
         sm_scale = 1 / (headdim ** 0.5)
-        for i in range(5): kernel_int8(q_compact, k_compact, v, o_int4, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0,sparse)
+        for i in range(5): kernel_int8(q, k, v, o_int4, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0,sparse)
         torch.cuda.synchronize()
-        _, time_int8 = benchmark_forward(kernel_int8, q_compact, k_compact, v, o_int4, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0, sparse,repeats=100, verbose=False, desc='Triton')
+        _, time_int8 = benchmark_forward(kernel_int8, q, k, v, o_int4, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0, sparse,repeats=100, verbose=False, desc='Triton')
     
         print(f'seq len: {seq_len}, sparse ratio: {sparse_ratio}, latency:{time_int8.mean*1e3}, flops: {flops/time_int8.mean*1e-12}')
        
