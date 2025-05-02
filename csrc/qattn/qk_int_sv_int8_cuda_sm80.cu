@@ -274,7 +274,7 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
 #pragma unroll
   for (uint32_t iter = 1; iter < num_iterations - 1; iter++)
   {
-    if (sparse[blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y+iter] == false)
+    if (sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+iter-1] == false)
   {
     continue;
   }
@@ -403,7 +403,7 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
   }
   
   // second last iter, apply causal mask
-  if (num_iterations > 1 && sparse[blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y+num_iterations-1] == true)
+  if (num_iterations > 1 && sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+num_iterations-2] == true)
   {
     // ensure K is ready
     cp_async::wait_group<1>();
@@ -532,7 +532,7 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
   }
 
   // last iter, apply causal mask and out of bound mask
-  if(sparse[blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y+num_iterations] == true)
+  if(sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+num_iterations-1] == true)
   {
     // ensure K is ready
     cp_async::wait_group<1>();

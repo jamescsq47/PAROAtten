@@ -1,4 +1,5 @@
 import torch
+from torch.nn.functional import scaled_dot_product_attention as sdpa
 from flash_attn.utils.benchmark import benchmark_forward
 import paroattention._qattn_sm80 as qattn
 import argparse
@@ -112,15 +113,22 @@ dense_o_int8 = torch.empty(batch, head, seq_len, headdim, dtype=torch.float16).c
 sm_scale = 1 / (headdim ** 0.5)
 is_causal = False
 _is_causal = 1 if is_causal else 0
-for i in range(2): 
-    kernel_int8(q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)
-    torch.cuda.synchronize()
-for i in range(2): 
-    kernel_int8(q_int8, k_int8, v, dense_o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse)
-    torch.cuda.synchronize()
-# _, time_int8 = benchmark_forward(kernel_int8, q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
-print(o_int8) # torch.Size([1, 48, 17776, 64])
-print(dense_o_int8) # torch.Size([1, 48, 17776, 64])
+for i in range(5): kernel_int8(q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)
+torch.cuda.synchronize()
+for i in range(5): kernel_int8(q_int8, k_int8, v, dense_o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse)
+torch.cuda.synchronize()
+_, time_int8 = benchmark_forward(kernel_int8, q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
+flops = 4 * head * batch * headdim * seq_len * seq_len / (2 if is_causal else 1)
+sparse_ratio = torch.sum(sparse).item() / (64*278*278)
+print(f'PARO: sparse ratio: {sparse_ratio}, latency:{time_int8.mean*1e3}, flops: {flops/time_int8.mean*1e-12}')      
+
+for i in range(5): sdpa(q.to(torch.float16), k.to(torch.float16), v, is_causal=is_causal)
+torch.cuda.synchronize()
+_, time_fa = benchmark_forward(sdpa, q.to(torch.float16), k.to(torch.float16), v, is_causal=is_causal, repeats=100, verbose=False, desc='Triton')
+print(f'FA2: latency:{time_fa.mean*1e3}, flops: {flops/time_fa.mean*1e-12}')
+
+# print(o_int8) # torch.Size([1, 48, 17776, 64])
+# print(dense_o_int8) # torch.Size([1, 48, 17776, 64])
 diff = torch.abs(o_int8 - dense_o_int8)
 mean_diff = torch.mean(diff)
 print(f"Mean difference: {mean_diff.item()}")
