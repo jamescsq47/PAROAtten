@@ -330,6 +330,7 @@
     load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
       &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K, flag);
     cp_async::commit_group();
+    K_load_idx_lane_base += CTA_K;
      
  
      dequant_scale = q_scale * K_scale[k_scale_idx + iter * k_scale_advance_offset];
@@ -355,21 +356,20 @@
     load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
       &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V, flag);
     cp_async::commit_group();
-     K_load_idx_lane_base += CTA_K;
      V_load_idx_lane_base += CTA_K;
      }
      else{
       load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
         &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K, flag);
       cp_async::commit_group();
+      K_load_idx_lane_base += CTA_K;
       dequant_scale = q_scale * K_scale[k_scale_idx + iter * k_scale_advance_offset];
       sm_scale = original_sm_scale * dequant_scale;
       load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
         &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V, flag);
       cp_async::commit_group();
-      K_idx_lane_base += CTA_K;
-      K_load_idx_lane_base += CTA_K;
       V_load_idx_lane_base += CTA_K;
+      K_idx_lane_base += CTA_K;
      }
    }
    
@@ -484,7 +484,7 @@
     K_load_idx_lane_base += CTA_K;
     V_load_idx_lane_base += CTA_K;
    }
- 
+
    // last iter, apply causal mask and out of bound mask
    if(sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+num_iterations-1] == true)
    {
