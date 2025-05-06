@@ -50,12 +50,14 @@ elif args.pv_accum_dtype == 'fp16+fp32':
 elif args.pv_accum_dtype == 'fp16':
     kernel_int8 = qattn.qk_int8_sv_int8_accum_f16_attn # the kernel with fully fp16 accumulator
 
+# kernel_int8 = qattn.qk_int8_sv_f16_accum_f16_attn
+
 _qk_quant_gran = 3 if args.quant_gran == 'per_thread' else 2
 
-for sparse_ratio in {0.2, 0.3, 0.5}:
+for sparse_ratio in {0.5,1}:
     is_causal = False
     _is_causal = 1 if is_causal else 0
-    for seq_len in {1024, 2048, 4096, 8192, 16384, 32768}: #1024, 2048, 4096, 8192, 16384, 32768
+    for seq_len in {17792}: #1024, 2048, 4096, 8192, 16384, 32768
         sparse = torch.zeros((batch*head*seq_len*seq_len//4096), dtype=bool).cuda()
         random_tensor = torch.rand(sparse.shape).cuda()
         sparse[random_tensor < sparse_ratio] = True
@@ -78,9 +80,9 @@ for sparse_ratio in {0.2, 0.3, 0.5}:
         o_int4 = torch.empty(batch, seq_len, head, headdim, dtype=torch.float16).cuda()
         o_int8 = torch.empty(batch, seq_len, head, headdim, dtype=torch.float16).cuda()
         sm_scale = 1 / (headdim ** 0.5)
-        for i in range(5): kernel_int8(q, k, v, o_int4, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0,sparse)
+        for i in range(5): kernel_int8(q, k, v.to(torch.float16), o_int8, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0,sparse)
         torch.cuda.synchronize()
-        _, time_int8 = benchmark_forward(kernel_int8, q, k, v, o_int4, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0, sparse,repeats=100, verbose=False, desc='Triton')
+        _, time_int8 = benchmark_forward(kernel_int8, q, k, v.to(torch.float16), o_int8, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0, sparse,repeats=100, verbose=False, desc='Triton')
     
         print(f'seq len: {seq_len}, sparse ratio: {sparse_ratio}, latency:{time_int8.mean*1e3}, flops: {flops/time_int8.mean*1e-12}')
        
