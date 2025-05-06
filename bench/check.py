@@ -2,6 +2,7 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention as sdpa
 from flash_attn.utils.benchmark import benchmark_forward
 import paroattention._qattn_sm80 as qattn
+import sageattention._qattn_sm80 as qattn_sage
 import argparse
 from quant import per_block_int8 as per_block_int8_cuda
 from quant import per_warp_int8 as per_warp_int8_cuda
@@ -33,6 +34,7 @@ WARP_Q = 32
 WARP_K = 64
 
 kernel_int8 = qattn.qk_int8_sv_f16_accum_f16_attn
+kernel_sage = qattn_sage.qk_int8_sv_f16_accum_f16_attn
 
 _qk_quant_gran = 3 if args.quant_gran == 'per_thread' else 2 # 'per_warp'
 # _qk_quant_gran = 1 if args.quant_gran == 'per_block' else _qk_quant_gran
@@ -66,26 +68,24 @@ all_one_sparse = torch.ones((48, 278, 278), dtype=torch.bool).cuda()  # 全True�
 # plt.savefig(output_path)
 # print(f"Visualization saved to {output_path}")
 
-
-
 # torch.Size([30, 42, 48, 274, 274]) 17536=64*274
-q = torch.load("/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/query_permute.pth")
+q = torch.load("/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/query_permute.pth").cuda()
 print(q.dtype)# torch.Size([2, 48, 17776, 64]) torch.bfloat16
 q = q[:1,:,:,:]
 # new_q = torch.zeros((1, 48, 17806, 64), dtype=torch.bfloat16).cuda()
 # new_q[:, :, 30:, :] = q
-k = torch.load("/home/xieruiqi/diffuser-dev-225exp/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/key_permute.pth")
+k = torch.load("/home/xieruiqi/diffuser-dev-225exp/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/key_permute.pth").cuda()
 print(k.dtype)# torch.Size([2, 48, 17776, 64]) torch.bfloat16
 k = k[:1,:,:,:]
 # new_k = torch.zeros((1, 48, 17806, 64), dtype=torch.bfloat16).cuda()
 # new_k[:, :, 30:, :] = k
-v = torch.load("/home/xieruiqi/diffuser-dev-225exp/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/value_permute.pth")
+v = torch.load("/home/xieruiqi/diffuser-dev-225exp/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/value_permute.pth").cuda()
 print(v.dtype)# torch.Size([2, 48, 17776, 64]) torch.bfloat16
 v = v.to(torch.float16)
 v = v[:1,:,:,:]
 # new_v = torch.zeros((1, 48, 17806, 64), dtype=torch.float16).cuda()
 # new_v[:, :, 30:, :] = v
-out = torch.load("/home/xieruiqi/diffuser-dev-225exp/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/attn_out_test.pth")
+out = torch.load("/home/xieruiqi/diffuser-dev-225exp/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/attn_out_test.pth").cuda()
 print(out.dtype) # torch.Size([2, 48, 17776, 64]) torch.bfloat16
 out = out[:1,:,:,:]
 # new_out = torch.zeros((1, 48, 17806, 64), dtype=torch.float16).cuda()
@@ -93,7 +93,12 @@ out = out[:1,:,:,:]
 
 sm_scale = 1 / (64 ** 0.5)
 tensor_layout = "HND"
+
 q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(q, k, BLKQ=64, WARPQ=32, BLKK=64, tensor_layout=tensor_layout)
+q_int8 = q_int8.cuda()
+k_int8 = k_int8.cuda()
+q_scale = q_scale.cuda()
+k_scale = k_scale.cuda()
 # q_int8, q_scale, k_int8, k_scale = per_block_int8_cuda(q, k, BLKQ=64, BLKK=64, tensor_layout=tensor_layout)
 
 print(q_int8.shape) # torch.Size([2, 48, 17776, 64])
@@ -113,23 +118,32 @@ dense_o_int8 = torch.empty(batch, head, seq_len, headdim, dtype=torch.float16).c
 sm_scale = 1 / (headdim ** 0.5)
 is_causal = False
 _is_causal = 1 if is_causal else 0
-for i in range(5): kernel_int8(q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)
-torch.cuda.synchronize()
-for i in range(5): kernel_int8(q_int8, k_int8, v, dense_o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse)
-torch.cuda.synchronize()
-_, time_int8 = benchmark_forward(kernel_int8, q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
 flops = 4 * head * batch * headdim * seq_len * seq_len / (2 if is_causal else 1)
-sparse_ratio = torch.sum(sparse).item() / (64*278*278)
-print(f'PARO: sparse ratio: {sparse_ratio}, latency:{time_int8.mean*1e3}, flops: {flops/time_int8.mean*1e-12}')      
+sparse_ratio = torch.sum(sparse).item() / (48*278*278)
 
 for i in range(5): sdpa(q.to(torch.float16), k.to(torch.float16), v, is_causal=is_causal)
 torch.cuda.synchronize()
 _, time_fa = benchmark_forward(sdpa, q.to(torch.float16), k.to(torch.float16), v, is_causal=is_causal, repeats=100, verbose=False, desc='Triton')
 print(f'FA2: latency:{time_fa.mean*1e3}, flops: {flops/time_fa.mean*1e-12}')
 
+for i in range(5): kernel_sage(q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0)
+torch.cuda.synchronize()
+_, time_sage = benchmark_forward(kernel_sage, q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, repeats=100, verbose=False, desc='Triton')
+print(f'Sage: latency:{time_sage.mean*1e3}, flops: {flops/time_sage.mean*1e-12}')
+
+for i in range(5): kernel_int8(q_int8, k_int8, v, dense_o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse)
+torch.cuda.synchronize()
+_, time_all_dense_int8 = benchmark_forward(kernel_int8, q_int8, k_int8, v, dense_o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse, repeats=100, verbose=False, desc='Triton')
+print(f'PARO: sparse ratio:1, latency:{time_all_dense_int8.mean*1e3}, flops: {flops/time_all_dense_int8.mean*1e-12}')      
+
+for i in range(5): kernel_int8(q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)
+torch.cuda.synchronize()
+_, time_int8 = benchmark_forward(kernel_int8, q_int8, k_int8, v, o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
+print(f'PARO: sparse ratio: {sparse_ratio}, latency:{time_int8.mean*1e3}, flops: {flops/time_int8.mean*1e-12}')      
+
 # print(o_int8) # torch.Size([1, 48, 17776, 64])
 # print(dense_o_int8) # torch.Size([1, 48, 17776, 64])
-diff = torch.abs(o_int8 - dense_o_int8)
+diff = torch.abs(o_int8 - out)
 mean_diff = torch.mean(diff)
 print(f"Mean difference: {mean_diff.item()}")
 
@@ -172,12 +186,11 @@ print(f"Mean difference: {mean_diff.item()}")
 # print(f"Visualization saved to {output_path}")
 
 
-print(torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3))
-print(torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3).shape)
-print(torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3).mean())
+print(torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3))
+print(torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3).shape)
+print(torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3).mean())
 
-# 假设 cosine_similarity 已经计算完成
-cos_sim = torch.cosine_similarity(o_int8[:, :, :, :], dense_o_int8[:, :, :, :], dim=3)  # 结果大小为 [1, 48, 17762]
+cos_sim = torch.cosine_similarity(o_int8[:, :, :, :], out[:, :, :, :], dim=3)  #[1, 48, 17762]
 print(torch.mean(cos_sim))
 # 去掉 batch 维度，形状变为 [48, 17762]
 # cos_sim_data = cos_sim.squeeze(0).cpu().numpy()
