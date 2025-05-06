@@ -274,10 +274,9 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
 #pragma unroll
   for (uint32_t iter = 1; iter < num_iterations - 1; iter++)
   {
-    if (sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+iter-1] == false)
+    if (sparse[gridDim.x*(blockIdx.x+blockIdx.y*gridDim.x+blockIdx.z*gridDim.x*gridDim.y)+iter-1] == true)
   {
-    continue;
-  }
+   
     // ensure K is ready
     cp_async::wait_group<1>();
     __syncthreads();
@@ -400,6 +399,7 @@ __global__ void qk_int_sv_int8_attn_kernel(int8_t *__restrict__ Q, int8_t *__res
     cp_async::commit_group();
 
     K_load_idx_lane_base += CTA_K;
+   }
   }
   
   // second last iter, apply causal mask
