@@ -2,7 +2,6 @@ import torch
 from flash_attn.utils.benchmark import benchmark_forward
 
 import paroattention._qattn_sm80 as qattn
-
 import argparse
 
 def compact(x,y):
@@ -18,12 +17,12 @@ def process_tensor(tensor):
     return result
 
 
-parser = argparse.ArgumentParser(description='Benchmark QK INT8 PV INT8')
+parser = argparse.ArgumentParser(description='Benchmark QK INT8 PV FP16')
 parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
 parser.add_argument('--num_heads', type=int, default=32, help='Number of heads')
 parser.add_argument('--head_dim', type=int, default=128, help='Head dimension')
 parser.add_argument('--quant_gran', type=str, default='per_warp', choices=['per_warp', 'per_thread'], help='Quantization granularity')
-parser.add_argument('--pv_accum_dtype', type=str, default='fp16', choices=['fp16', 'fp16+fp32', 'fp32'])
+parser.add_argument('--pv_accum_dtype', type=str, default='fp16', choices=['fp16', 'int8'])
 args = parser.parse_args()
 
 head = args.num_heads
@@ -36,25 +35,19 @@ print(f"batch: {batch}, head: {head}, headdim: {headdim}, pv_accum_dtype: {args.
 WARP_Q = 16 if (headdim == 128 and args.pv_accum_dtype == "fp16+fp32") else 32
 WARP_K = 64
 
-if args.pv_accum_dtype == 'fp32':
-    kernel_int4 = qattn.qk_int4_sv_f16_accum_f32_attn # the kernel with fully fp32 accumulator
-elif args.pv_accum_dtype == 'fp16+fp32':
-    kernel_int4 = qattn.qk_int4_sv_f16_accum_f16_attn_inst_buf if headdim == 64 else qattn.qk_int4_sv_f16_accum_f16_attn_buf # the kernel with fp32 longterm buffer and fp16 shortterm accumulator
-elif args.pv_accum_dtype == 'fp16':
-    kernel_int4 = qattn.qk_int4_sv_f16_accum_f16_attn # the kernel with fully fp16 accumulator
+if args.pv_accum_dtype == 'fp16':
+    kernel_int4 = qattn.qk_int4_sv_f16_accum_f16_attn
+elif args.pv_accum_dtype == 'int8':
+    kernel_int4 = qattn.qk_int4_sv_int8_accum_f16_attn
 
-if args.pv_accum_dtype == 'fp32':
-    kernel_int8 = qattn.qk_int8_sv_f16_accum_f32_attn # the kernel with fully fp32 accumulator
-elif args.pv_accum_dtype == 'fp16+fp32':
-    kernel_int8 = qattn.qk_int8_sv_f16_accum_f16_attn_inst_buf if headdim == 64 else qattn.qk_int8_sv_f16_accum_f16_attn_buf # the kernel with fp32 longterm buffer and fp16 shortterm accumulator
-elif args.pv_accum_dtype == 'fp16':
-    kernel_int8 = qattn.qk_int8_sv_int8_accum_f16_attn # the kernel with fully fp16 accumulator
-
-# kernel_int8 = qattn.qk_int8_sv_f16_accum_f16_attn
+if args.pv_accum_dtype == 'fp16':
+    kernel_int8 = qattn.qk_int8_sv_f16_accum_f16_attn
+elif args.pv_accum_dtype == 'int8':
+    kernel_int8 = qattn.qk_int8_sv_int8_accum_f16_attn
 
 _qk_quant_gran = 3 if args.quant_gran == 'per_thread' else 2
 
-for sparse_ratio in {0.5,1}:
+for sparse_ratio in {0.2,0.3,0.5,1}:
     is_causal = False
     _is_causal = 1 if is_causal else 0
     for seq_len in {17792}: #1024, 2048, 4096, 8192, 16384, 32768
@@ -64,8 +57,6 @@ for sparse_ratio in {0.5,1}:
         flops = 4 * head * batch * headdim * seq_len * seq_len / (2 if is_causal else 1)
         q = torch.randint(-7, 8,(batch, seq_len, head, headdim), dtype=torch.int8).cuda()
         k = torch.randint(-7, 8,(batch, seq_len, head, headdim), dtype=torch.int8).cuda()
-        q_compact = process_tensor(q).cuda()
-        k_compact = process_tensor(k).cuda()
 
         vm = torch.randn(batch, head, headdim, dtype=torch.float16).cuda()
 
@@ -77,7 +68,6 @@ for sparse_ratio in {0.5,1}:
             k_scale = torch.randn(batch, head, seq_len // WARP_K * 4, dtype=torch.float).cuda()
         
         v = torch.randint(-7, 8,(batch, seq_len, head, headdim), dtype=torch.int8).cuda()
-        o_int4 = torch.empty(batch, seq_len, head, headdim, dtype=torch.float16).cuda()
         o_int8 = torch.empty(batch, seq_len, head, headdim, dtype=torch.float16).cuda()
         sm_scale = 1 / (headdim ** 0.5)
         for i in range(5): kernel_int8(q, k, v.to(torch.float16), o_int8, q_scale, k_scale, 0, _is_causal, _qk_quant_gran, sm_scale, 0,sparse)
