@@ -10,18 +10,6 @@ from quant import per_block_int8 as per_block_int8_cuda
 from quant import per_warp_int8 as per_warp_int8_cuda
 kernel_sage = qattn_sage.qk_int8_sv_f16_accum_f16_attn
 kernel_sparge = qattn_sparge.qk_int8_sv_f16_accum_f16_block_sparse_attn_inst_buf_with_pv_threshold
-def compact(x,y):
-    return ((x <<4) | (y&0x0F))
-def process_tensor(tensor):
-    tensor_flat = tensor.view(-1)
-    result = torch.empty(tensor_flat.size(0) // 2, dtype=torch.int8, device=tensor.device)    
-    result[:] = compact(tensor_flat[0::2], tensor_flat[1::2])
-    result = result.view(tensor.size(0), tensor.size(1), tensor.size(2), tensor.size(3)//2)
-    zero = torch.zeros(tensor.size(0), tensor.size(1), tensor.size(2), tensor.size(3)//2, dtype=torch.int8, device=tensor.device)
-    # result=torch.cat((result,zero),dim=3)
-    result=torch.cat((result,result),dim=3)
-    return result
-
 
 parser = argparse.ArgumentParser(description='Benchmark QK INT8 PV FP16')
 parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
