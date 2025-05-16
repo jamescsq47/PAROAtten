@@ -28,10 +28,10 @@ from svg.models.cog.utils import get_attention_mask
 
 parser = argparse.ArgumentParser(description='Benchmark QK INT8 PV FP16')
 parser.add_argument('--quant_gran', type=str, default='per_warp', choices=['per_block', 'per_warp', 'per_thread'], help='Quantization granularity')
-parser.add_argument('--q_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/query_tensor.pth')
-parser.add_argument('--k_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/key_tensor.pth')
-parser.add_argument('--v_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/value_tensor.pth')
-parser.add_argument('--permute_plan_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth')
+parser.add_argument('--q_path', type=str, default='')
+parser.add_argument('--k_path', type=str, default='')
+parser.add_argument('--v_path', type=str, default='')
+parser.add_argument('--permute_plan_path', type=str, default='')
 args = parser.parse_args()
 print(f"PAROAttention QK Int8 PV fp16 and Other Methods' Profiling with Given Data of cogvideo")
 
