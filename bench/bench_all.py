@@ -246,8 +246,9 @@ for simthreshd1, cdfthreshd in {(0.3,0.85), (0.5,0.1), (0.6,0.77)}:#(0.6,0.55), 
         qk_sparsity = (valid_block_num.float().sum()) / (lut.size(3) * lut.size(2) * lut.size(0) * lut.size(1))
     else:
         qk_sparsity = (valid_block_num.float().sum()) / ((lut.size(3) + 2) // 2 * lut.size(2) * lut.size(0) * lut.size(1))
-    print(f'sparge: qk sparse ratio:{qk_sparsity.item()}, latency: {time_sparge.mean*1e3}ms, flops:{flops/time_sparge.mean*1e-12}TFLOPs/s, speed-up ratio: {time_fa.mean/time_sparge.mean}x')
-    print(f'overhead of sparge attention: {time_sparge_overhead.mean*1e3}, which equals to {time_sparge_overhead.mean/time_sparge.mean} of the GEMM time\n')
+    print(f'sparge: qk sparse ratio:{qk_sparsity.item()}, latency: {time_sparge.mean*1e3}ms, flops:{flops/time_sparge.mean*1e-12}TFLOPs/s')
+    print(f'overhead of sparge attention: {time_sparge_overhead.mean*1e3}, which equals to {time_sparge_overhead.mean/time_sparge.mean} of the GEMM time')
+    print(f'overall speed-up ratio: {time_fa.mean/(time_sparge.mean + time_sparge_overhead.mean)}x\n')
 
 context_length = 226
 num_frame = 50
@@ -268,8 +269,9 @@ for sparsity in {0.2, 0.3, 0.5}:
         for i in range(5): flex_attention(q.to(torch.float16), k.to(torch.float16), v.to(torch.float16), block_mask=block_mask)
         torch.cuda.synchronize()
         _, time_flex = benchmark_forward(flex_attention, q.to(torch.float16), k.to(torch.float16), v.to(torch.float16), block_mask=block_mask, repeats=100, verbose=False, desc='Triton')
-    print(f'SVG: sparse ratio: {sparsity}, latency：{time_flex.mean*1e3} ms, flops: {flops/time_flex.mean*1e-12} TFLOPs/s, speed-up ratio: {time_fa.mean/time_flex.mean}x')
-    print(f'overhead of SVG: {time_svg_overhead.mean*1e3}ms, which equals to {time_svg_overhead.mean/time_flex.mean} of the GEMM time\n')
+    print(f'SVG: sparse ratio: {sparsity}, latency：{time_flex.mean*1e3} ms, flops: {flops/time_flex.mean*1e-12} TFLOPs/s')
+    print(f'overhead of SVG: {time_svg_overhead.mean*1e3}ms, which equals to {time_svg_overhead.mean/time_flex.mean} of the GEMM time')
+    print(f'overall speed-up ratio: {time_fa.mean/(time_flex.mean + time_svg_overhead.mean)}x\n')
 
 for sparse_ratio in {0.2, 0.3, 0.5}:
     sparse = torch.zeros((batch*head*((63+seq_len)//64)*((63+seq_len)//64)), dtype=bool).cuda()
@@ -278,5 +280,6 @@ for sparse_ratio in {0.2, 0.3, 0.5}:
     for i in range(5): kernel_paro(q_int8, k_int8, v, kernel_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)
     torch.cuda.synchronize()
     _, time_paro = benchmark_forward(kernel_paro, q_int8, k_int8, v, kernel_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
-    print(f'PARO: sparse ratio:{sparse_ratio}, latency:{time_paro.mean*1e3}ms, flops: {flops/time_paro.mean*1e-12}TFLOPs/s, speed-up ratio: {time_fa.mean/time_paro.mean}x')      
-    print(f'overhead of PARO attention: {time_paro_quant.mean*1e3}, which equals to {time_paro_quant.mean/time_paro.mean} of the GEMM time\n')
+    print(f'PARO: sparse ratio:{sparse_ratio}, latency:{time_paro.mean*1e3}ms, flops: {flops/time_paro.mean*1e-12}TFLOPs/s')      
+    print(f'overhead of PARO attention: {time_paro_quant.mean*1e3}, which equals to {time_paro_quant.mean/time_paro.mean} of the GEMM time')
+    print(f'overall speed-up ratio: {time_fa.mean/(time_paro.mean + time_paro_quant.mean)}x\n')
