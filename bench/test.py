@@ -47,7 +47,7 @@ elif args.pv_accum_dtype == 'int8':
 
 _qk_quant_gran = 3 if args.quant_gran == 'per_thread' else 2
 
-for sparse_ratio in {0.2,0.3,0.5,1}:
+for sparse_ratio in {0.2,0.3,0.5,0.75,1}:
     is_causal = False
     _is_causal = 1 if is_causal else 0
     for seq_len in {17792}: #1024, 2048, 4096, 8192, 16384, 32768

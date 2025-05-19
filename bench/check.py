@@ -40,6 +40,8 @@ sparse_plan = torch.load('/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/log
 permute_plan = torch.load('/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth', map_location = 'cuda')
 sparse = torch.load("/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth")
 
+import ipdb; ipdb.set_trace()
+
 class PAROAttentionMap(torch.nn.Module):
     """
     the PARO sparse processor for attention map: block_sparse + empty
