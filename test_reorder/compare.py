@@ -7,9 +7,13 @@
 
 import torch
 from diffusers.models.transformers.cogvideox_transformer_3d import CogVideoXBlock
-from diffusers.models.transformers.test_cogvideox_transformer_3d import CogVideoXBlock as test_CogVideoXBlock
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+from my_diffusers.models.transformers.test_cogvideox_transformer_3d import CogVideoXBlock as test_CogVideoXBlock
 from diffusers.models.normalization import CogVideoXLayerNormZero
-from diffusers.models.test_normalization import ReorderCogVideoXLayerNormZero
+from my_diffusers.models.test_normalization import ReorderCogVideoXLayerNormZero
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -44,11 +48,12 @@ def compare_blocks(
     # 创建原始模型
     print("\n初始化原始CogVideoXBlock...")
     original_block = CogVideoXBlock(**params).to(device).to(dtype)
-    
+
     # 创建测试模型
     print("初始化测试test_CogVideoXBlock...")
     test_block = test_CogVideoXBlock(**params).to(device).to(dtype)
-    
+
+
     # 确保两个模型具有相同的权重
     print("\n复制原始模型的权重到测试模型...")
     test_block.load_state_dict(original_block.state_dict(), strict=False)
