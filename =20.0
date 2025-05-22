@@ -1,0 +1,5 @@
+Looking in indexes: https://mirrors.ustc.edu.cn/pypi/web/simple
+Collecting packaging
+  Downloading https://mirrors.ustc.edu.cn/pypi/packages/20/12/38679034af332785aac8774540895e234f4d07f7545804097de4b666afd8/packaging-25.0-py3-none-any.whl (66 kB)
+Installing collected packages: packaging
+Successfully installed packaging-25.0

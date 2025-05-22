@@ -132,7 +132,7 @@ class PARO_CogVideoXAttnProcessor2_0:
     ) -> torch.Tensor:
         
         if sparse is None:
-            sparse = getattr(attn, "sparse_mask_cpu", None)
+            sparse = getattr(attn, "sparse_mask_gpu", None)
 
         if permute_plan is None:
             permute_plan = getattr(attn, "permute_plan", None)
@@ -154,9 +154,9 @@ class PARO_CogVideoXAttnProcessor2_0:
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
 
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2).contiguous()
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2).contiguous()
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2).contiguous()
 
         if attn.norm_q is not None:
             query = attn.norm_q(query)
@@ -179,27 +179,24 @@ class PARO_CogVideoXAttnProcessor2_0:
         # support prefetch and not.
         # import ipdb; ipdb.set_trace()
 
-        hidden_states = torch.zeros((2, 48, 17776, 64), device = 'cuda', dtype=torch.bfloat16)
+        hidden_states = torch.empty((2, 48, 17776, 64), device = 'cuda', dtype=torch.float16)
+
         
         sm_scale = 1 / (head_dim ** 0.5)
         q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(query, key, BLKQ=64, WARPQ=32, BLKK=64, tensor_layout="HND")
 
-        print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device)
-
         kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse) # tensor_layout,_is_causal, _qk_quant_gran
-
-        print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device, hidden_states.stride())
         
-        # print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device) # torch.Size([2, 17776, 3072])
+        print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device) # torch.Size([2, 17776, 3072])
 
         # hidden_states = F.scaled_dot_product_attention(
         #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         # )
 
-        # print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device, hidden_states.stride()) # torch.Size([2, 48, 17776, 64])
+        # print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device) # torch.Size([2, 48, 17776, 64])
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.contiguous()
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim).to(torch.bfloat16)
+
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
         # dropout
@@ -208,4 +205,7 @@ class PARO_CogVideoXAttnProcessor2_0:
         encoder_hidden_states, hidden_states = hidden_states.split(
             [text_seq_length, hidden_states.size(1) - text_seq_length], dim=1
         )
+
+        print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device, hidden_states.stride())
+
         return hidden_states, encoder_hidden_states
