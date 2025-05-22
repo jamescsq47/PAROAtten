@@ -28,12 +28,11 @@ from svg.models.cog.utils import get_attention_mask
 
 parser = argparse.ArgumentParser(description='Benchmark QK INT8 PV FP16')
 parser.add_argument('--quant_gran', type=str, default='per_warp', choices=['per_block', 'per_warp', 'per_thread'], help='Quantization granularity')
-parser.add_argument('--q_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/query_tensor.pth')
-parser.add_argument('--k_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/key_tensor.pth')
-parser.add_argument('--v_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/value_tensor.pth')
-parser.add_argument('--permute_plan_path', type=str, default='/home/xieruiqi/diffuser-dev/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth')
+parser.add_argument('--q_path', type=str, default='/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/query_tensor.pth')
+parser.add_argument('--k_path', type=str, default='/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/key_tensor.pth')
+parser.add_argument('--v_path', type=str, default='/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/value_tensor.pth')
 args = parser.parse_args()
-print(f"PAROAttention QK Int8 PV fp16 and Other Methods' Profiling with Given Data of cogvideo")
+print(f"PAROAttention QK Int8 PV fp16 Benchmark with Given Data of cogvideo")
 
 CTA_Q = 64
 CTA_K = 64
@@ -47,7 +46,202 @@ q_path = args.q_path
 k_path = args.k_path
 v_path = args.v_path
 _qk_quant_gran = 3 if args.quant_gran == 'per_thread' else 2 # 'per_warp'
-permute_plan = torch.load(args.permute_plan_path, map_location = 'cuda')
+sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/sparse_plan.pth', map_location = 'cuda')
+permute_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth', map_location = 'cuda')
+sparse = torch.load("/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth")
+
+class PAROAttentionMap(torch.nn.Module):
+    """
+    the PARO sparse processor for attention map: block_sparse + empty
+    """
+    def __init__(
+        self,
+    ) -> None:
+        super().__init__()
+        self.sparse_plan = sparse_plan
+        self.permute_plan = permute_plan
+        self.empty_head_processor = 'zero'
+        self.online = False
+        self.dense_rate_accumulator = []
+        self.i_block = 1
+        self.i_timestep = 0
+
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        '''
+        get the empty heads and assign uniform attn values to them. 
+        '''
+
+        BS, head_per_split_num, N_token, N_token = x.shape
+        N_text_token = 256
+        N_image_token = N_token - N_text_token
+        attn_map_image = x[:,:,N_text_token:,N_text_token:]
+        
+        # DEBUG_ONLY
+        x_old = x.clone()
+        attn_map_image_old = attn_map_image.clone()
+        
+        self.block_sparse_size = 64
+        
+        # INFO" get the sparse mask.
+        self.N_block_sparse = N_image_token // self.block_sparse_size
+        N_block_sparse = self.N_block_sparse
+        N_mask_token = N_block_sparse*self.block_sparse_size  # when not divisible, could be smaller than N_image_token
+        indices = torch.arange(self.split_range[0], self.split_range[1], device='cuda')
+        
+        attn_map_image_ = attn_map_image[:,:,:N_mask_token,:N_mask_token]
+        if False:
+            block_sparse_masks = self.get_sparse_mask(attn_map_image_)
+        else:
+            N_timestep_in_calib_data = self.sparse_plan['sparse'].shape[0]
+            i_timestep_in_calib_data = int(self.i_timestep // (1/N_timestep_in_calib_data))
+            block_sparse_masks = self.sparse_plan['sparse'][i_timestep_in_calib_data, self.i_block,indices].unsqueeze(0).repeat([BS,1,1,1])  # [BS, N_block, N_block]
+            
+        for i_ in indices:
+            block_sparse_mask = block_sparse_masks[:,i_%head_per_split_num,:,:]
+            # import ipdb; ipdb.set_trace()
+            block_sparse_mask = block_sparse_mask.reshape([BS,self.N_block_sparse,1,self.N_block_sparse,1])
+            
+            attn_map_image_head = attn_map_image_[:,i_ % head_per_split_num,:,:].reshape([
+                BS,
+                self.N_block_sparse,
+                self.block_sparse_size,
+                self.N_block_sparse,
+                self.block_sparse_size,    
+            ])
+            
+            attn_map_image[:,i_%head_per_split_num,:N_mask_token,:N_mask_token] = (attn_map_image_head*block_sparse_mask).reshape([
+                BS,N_mask_token,N_mask_token
+            ])
+        
+        indices = torch.arange(self.split_range[0], self.split_range[1], device='cuda')
+        if_head_empty = self.permute_plan['empty'][self.i_block][indices]
+        empty_indices = torch.nonzero(if_head_empty).squeeze(-1)
+        
+        if len(empty_indices) > 0:
+            # print('Block {}, has empty heads {}'.format(self.i_block, empty_indices.tolist()))
+            empty_heads = attn_map_image.index_select(dim=1, index=empty_indices)
+            if self.empty_head_processor == 'uniform':
+                x[:,empty_indices,N_text_token:,N_text_token:] = empty_heads.mean(-1).unsqueeze(-1).repeat(1,1,1,N_image_token)
+            elif self.empty_head_processor == 'zero':
+                x[:,empty_indices,N_text_token:,N_text_token:].fill_(0.)
+            else:
+                raise NotImplementedError
+        
+        block_sparse_mask_with_empty = block_sparse_masks*(1-if_head_empty).reshape([1,head_per_split_num,1,1])
+        dense_rate = (block_sparse_masks.sum() / block_sparse_masks.numel()).item()
+        dense_rate_with_empty = (block_sparse_mask_with_empty.sum() / block_sparse_mask_with_empty.numel()).item()
+        # print(f'dense rate:{dense_rate:.4f}, dense_rate_with_empty:{dense_rate_with_empty:.4f}')
+        self.dense_rate_accumulator.append(dense_rate_with_empty)
+
+        return x
+
+def customize_scaled_dot_product_attention(q_path, k_path, v_path, attn_mask=None, dropout_p=0.0,
+        is_causal=False, scale=None, enable_gqa=False, head_split_num=12,\
+        ) -> torch.Tensor:
+        
+        device = 'cuda'
+        query = torch.load(q_path,map_location = 'cuda')
+        key = torch.load(k_path,map_location = 'cuda')
+        value = torch.load(v_path,map_location = 'cuda')
+            
+        L, S = query.size(-2), key.size(-2)
+        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+        attn_bias = torch.zeros(L, S, dtype=query.dtype).to(device)
+        # if is_causal:
+        #     assert attn_mask is None
+        #     temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+        #     attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        #     attn_bias.to(query.dtype)
+
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+            else:
+                attn_bias += attn_mask
+
+        # if enable_gqa:
+        #     key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
+        #     value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
+
+        assert L == S
+
+        head_num = query.shape[1]
+        head_split_num = 12
+        head_per_split_num = head_num // head_split_num
+        assert head_num % head_split_num == 0
+        attn_output = torch.zeros_like(query)
+        softmax_func = torch.softmax
+        
+        '''
+        INFO: the qk permute (token-level) based on existing permuteing order.
+        '''
+        query_old = query.clone()
+        key_old = key.clone()
+        value_old = value.clone()
+        query, key, value = permute_qk(query, key, value)
+        
+        # import ipdb; ipdb.set_trace()
+        
+        for i in range(head_split_num):
+            slice_range = (slice(None), slice(i * head_per_split_num, (i + 1) * head_per_split_num), slice(None), slice(None))
+            query_part = query[slice_range]
+            key_part = key[slice_range]
+            value_part = value[slice_range]
+        
+            '''Quantization: qkv'''   
+            # INFO: if config.attn.skip_text_quant = True, quantize image_part only.
+            n_text_tokens = 256
+            n_token = query.shape[2]
+            n_image_tokens = n_token - n_text_tokens
+        
+            query_part_ = query_part[:,:,:n_image_tokens,:]
+            key_part_ = key_part[:,:,:n_image_tokens,:]
+            value_part_ = value_part[:,:,:n_image_tokens,:]
+                
+            BS, head_per_split_num, N_token, N_dim = query_part_.shape
+
+            q_quantizer = nn.Identity()
+            k_quantizer = nn.Identity()
+            v_quantizer = nn.Identity()
+            pre_softmax_attn_map_quantizer = nn.Identity()
+            attn_map_quantizer = nn.Identity()
+            attn_map_sparse_processor = PAROAttentionMap()
+
+            query_part[:,:,:N_token,:] = q_quantizer(query_part_.reshape([-1,N_dim])).reshape([BS, head_per_split_num, N_token, N_dim])
+            key_part[:,:,:N_token,:] = k_quantizer(key_part_.reshape([-1,N_dim])).reshape([BS, head_per_split_num, N_token, N_dim])
+            
+            n_group = 1  # default
+
+            value_part_ = value_part_.reshape([BS,head_per_split_num,n_group,N_token//n_group,N_dim]).permute([0,1,4,2,3]).reshape([-1,N_token//n_group])
+            value_part[:,:,:N_token,:] = v_quantizer(
+                    value_part_
+                ).reshape([BS, head_per_split_num, N_dim, N_token]).permute([0,1,3,2])
+            attn_map_pre_softmax_part = query_part @ key_part.transpose(-2, -1) * scale_factor
+            attn_map_pre_softmax_part += attn_bias
+
+            attn_map_sparse_processor.split_range = [i * head_per_split_num, (i + 1) * head_per_split_num]
+            
+            BS, head_per_split_num, N_token, N_token = attn_map_pre_softmax_part.shape
+
+            attn_map_post_softmax_part = softmax_func(attn_map_pre_softmax_part, dim=-1)
+            attn_map_post_softmax_part = torch.dropout(attn_map_post_softmax_part, dropout_p, train=True)
+
+            attn_map_post_softmax_part = attn_map_sparse_processor(attn_map_post_softmax_part)
+            
+            attn_output[slice_range] = attn_map_post_softmax_part @ value_part
+        
+        # import ipdb; ipdb.set_trace()
+        # attn_output = permute_attn_out(attn_output)
+            
+        """ the same as the following code, only split to lower the memory footprint
+        attn_weight = query @ key.transpose(-2, -1) * scale_factor
+        attn_weight += attn_bias
+        attn_weight = torch.softmax(attn_weight, dim=-1)
+        attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+        attn_score = attn_weight @ value
+        """
+        assert attn_output.dtype == torch.bfloat16
+        return attn_output
     
 def permute_qk(query, key, value):
     # (F,W,H) -> (Frame, With, Height) 
@@ -143,12 +337,16 @@ def permute_attn_out(attn_out):
             
     return attn_out
 
+out = customize_scaled_dot_product_attention(q_path, k_path, v_path)
+out = out[:1,:,:,:]
+# out = torch.cat([out, out], dim=-1)
 
 flex_attention = torch.compile(flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 torch._dynamo.config.cache_size_limit = 192 * 3
 torch._dynamo.config.accumulated_cache_size_limit = 192 * 3
 
 def sample_mse(query, key, value, attention_masks):
+
     assert len(attention_masks) == 2
 
     cfg, num_heads, seq_len, dim = query.size()
@@ -186,6 +384,9 @@ def sparsity_to_width(sparsity, context_length, num_frame, frame_size):
     
     return width_frame
 
+sparse = sparse[0,1,:,:,:] # torch.Size([48, 278, 278]) one: calculate; zero: skip
+sparse = sparse.to(torch.bool).cuda() 
+all_one_sparse = torch.ones((48, 278, 278), dtype=torch.bool).cuda() # no sparse for comparison
 q = torch.load(q_path).cuda()# torch.Size([2, 48, 17776, 64]) torch.bfloat16
 k = torch.load(k_path).cuda()# torch.Size([2, 48, 17776, 64]) torch.bfloat16
 v = torch.load(v_path).cuda()# torch.Size([2, 48, 17776, 64]) torch.bfloat16
@@ -194,6 +395,11 @@ q,k,v = permute_qk(q,k,v)
 q = q[:1,:,:,:]
 k = k[:1,:,:,:]
 v = v[:1,:,:,:]
+# # if head_dim = 128
+# q = torch.cat([q, q], dim=-1)
+# k = torch.cat([k, k], dim=-1)
+# v = torch.cat([v, v], dim=-1)
+# print(q.shape)
 
 batch = q.shape[0]
 head = q.shape[1]
@@ -204,6 +410,7 @@ tensor_layout = "HND"
 is_causal = False
 _is_causal = 1 if is_causal else 0
 flops = 4 * head * batch * headdim * seq_len * seq_len / (2 if is_causal else 1)
+sparse_ratio = torch.sum(sparse).item() / (batch*head*seq_len*seq_len/CTA_Q/CTA_Q)
 
 for i in range(5):
     if(args.quant_gran == 'per_warp'):
@@ -222,12 +429,12 @@ print("The speed-up ratio is compared with FA2")
 for i in range(5): sdpa(q.to(torch.float16), k.to(torch.float16), v, is_causal=is_causal)
 torch.cuda.synchronize()
 _, time_fa = benchmark_forward(sdpa, q.to(torch.float16), k.to(torch.float16), v, is_causal=is_causal, repeats=100, verbose=False, desc='Triton')
-print(f'FA2: latency:{time_fa.mean*1e3}ms, flops: {flops/time_fa.mean*1e-12}TFLOPs/s, speed-up ratio: {time_fa.mean/time_fa.mean}x')
+print(f'\nFA2: latency:{time_fa.mean*1e3}ms, flops: {flops/time_fa.mean*1e-12}TFLOPs/s, speed-up ratio: {time_fa.mean/time_fa.mean}x')
 
 for i in range(5): kernel_sage(q_int8, k_int8, v, sage_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0)
 torch.cuda.synchronize()
 _, time_sage = benchmark_forward(kernel_sage, q_int8, k_int8, v, sage_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, repeats=100, verbose=False, desc='Triton')
-print(f'Sage: latency:{time_sage.mean*1e3}ms, flops: {flops/time_sage.mean*1e-12}TFLOPs/s, speed-up ratio: {time_fa.mean/time_sage.mean}x\n')
+print(f'Sage: latency:{time_sage.mean*1e3}ms, flops: {flops/time_sage.mean*1e-12}TFLOPs/s, speed-up ratio: {time_sage.mean/time_fa.mean}x\n')
 
 simthreshd1 = 0
 cdfthreshd = 0
@@ -238,7 +445,7 @@ for simthreshd1, cdfthreshd in {(0.3,0.85), (0.5,0.1), (0.6,0.77)}:#(0.6,0.55), 
     pvthreshd = 100000
     pvthreshd = hyperparameter_check(pvthreshd, q.size(-3), q.device)
     qk_sparsity = 0
-    out_sparge = torch.empty_like(kernel_out).cuda()
+    out_sparge = torch.empty_like(out).cuda()
     for i in range(5):kernel_sparge(q_sparge, k_sparge, v, out_sparge, lut, valid_block_num, pvthreshd, q_scale_sparge, k_scale_sparge, 1, _is_causal, 1, sm_scale, 0)
     torch.cuda.synchronize()
     _, time_sparge = benchmark_forward(kernel_sparge, q_sparge, k_sparge, v, out_sparge, lut, valid_block_num, pvthreshd, q_scale_sparge, k_scale_sparge, 1, _is_causal, 1, sm_scale, 0, repeats=100, verbose=False, desc='Triton')
@@ -246,9 +453,8 @@ for simthreshd1, cdfthreshd in {(0.3,0.85), (0.5,0.1), (0.6,0.77)}:#(0.6,0.55), 
         qk_sparsity = (valid_block_num.float().sum()) / (lut.size(3) * lut.size(2) * lut.size(0) * lut.size(1))
     else:
         qk_sparsity = (valid_block_num.float().sum()) / ((lut.size(3) + 2) // 2 * lut.size(2) * lut.size(0) * lut.size(1))
-    print(f'sparge: qk sparse ratio:{qk_sparsity.item()}, latency: {time_sparge.mean*1e3}ms, flops:{flops/time_sparge.mean*1e-12}TFLOPs/s')
-    print(f'overhead of sparge attention: {time_sparge_overhead.mean*1e3}, which equals to {time_sparge_overhead.mean/time_sparge.mean} of the GEMM time')
-    print(f'overall speed-up ratio: {time_fa.mean/(time_sparge.mean + time_sparge_overhead.mean)}x\n')
+    print(f'sparge: qk sparse ratio:{qk_sparsity.item()}, latency: {time_sparge.mean*1e3}ms, flops:{flops/time_sparge.mean*1e-12}TFLOPs/s, speed-up ratio: {time_sparge.mean/time_fa.mean}x')
+    print(f'overhead of sparge attention: {time_sparge_overhead.mean*1e3}, which equals to {time_sparge_overhead.mean/time_sparge.mean} of the GEMM time\n')
 
 context_length = 226
 num_frame = 50
@@ -270,8 +476,25 @@ for sparsity in {0.2, 0.3, 0.5}:
         torch.cuda.synchronize()
         _, time_flex = benchmark_forward(flex_attention, q.to(torch.float16), k.to(torch.float16), v.to(torch.float16), block_mask=block_mask, repeats=100, verbose=False, desc='Triton')
     print(f'SVG: sparse ratio: {sparsity}, latency：{time_flex.mean*1e3} ms, flops: {flops/time_flex.mean*1e-12} TFLOPs/s')
-    print(f'overhead of SVG: {time_svg_overhead.mean*1e3}ms, which equals to {time_svg_overhead.mean/time_flex.mean} of the GEMM time')
-    print(f'overall speed-up ratio: {time_fa.mean/(time_flex.mean + time_svg_overhead.mean)}x\n')
+    print(f'overhead of SVG: {time_svg_overhead.mean*1e3}ms, which equals to {time_svg_overhead.mean/time_flex.mean} of the GEMM time\n')
+
+for i in range(5): kernel_paro(q_int8, k_int8, v, dense_kernel_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse)
+torch.cuda.synchronize()
+_, time_all_dense_int8 = benchmark_forward(kernel_paro, q_int8, k_int8, v, dense_kernel_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, all_one_sparse, repeats=100, verbose=False, desc='Triton')
+print(f'PARO: sparse ratio:1, latency:{time_all_dense_int8.mean*1e3}ms, flops: {flops/time_all_dense_int8.mean*1e-12}TFLOPs/s')      
+
+for i in range(5): kernel_paro(q_int8, k_int8, v, kernel_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)
+torch.cuda.synchronize()
+_, time_paro = benchmark_forward(kernel_paro, q_int8, k_int8, v, kernel_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
+print(f'PARO: sparse ratio:{sparse_ratio}, latency:{time_paro.mean*1e3}ms, flops: {flops/time_paro.mean*1e-12}TFLOPs/s')      
+print(f'overhead of PARO attention: {time_paro_quant.mean*1e3}, which equals to {time_paro_quant.mean/time_paro.mean} of the GEMM time')
+
+diff = torch.abs(kernel_out - out)
+mean_diff = torch.mean(diff)
+print(f"Mean difference: {mean_diff.item()}")
+cos_sim = torch.cosine_similarity(kernel_out, out, dim=3)  #[1, 48, 17762]
+print(f"Mean cosin similarity: {torch.mean(cos_sim)}\n")
+# dense_kernel_out = sage_out
 
 for sparse_ratio in {0.2, 0.3, 0.5}:
     sparse = torch.zeros((batch*head*((63+seq_len)//64)*((63+seq_len)//64)), dtype=bool).cuda()
@@ -281,5 +504,5 @@ for sparse_ratio in {0.2, 0.3, 0.5}:
     torch.cuda.synchronize()
     _, time_paro = benchmark_forward(kernel_paro, q_int8, k_int8, v, kernel_out, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse, repeats=100, verbose=False, desc='Triton')
     print(f'PARO: sparse ratio:{sparse_ratio}, latency:{time_paro.mean*1e3}ms, flops: {flops/time_paro.mean*1e-12}TFLOPs/s')      
-    print(f'overhead of PARO attention: {time_paro_quant.mean*1e3}, which equals to {time_paro_quant.mean/time_paro.mean} of the GEMM time')
-    print(f'overall speed-up ratio: {time_fa.mean/(time_paro.mean + time_paro_quant.mean)}x\n')
+    print("   *sparse ratio means the ratio of calculated elements to all elements in the attention map")
+    print(f'overhead of PARO attention: {time_paro_quant.mean*1e3}, which equals to {time_paro_quant.mean/time_paro.mean} of the GEMM time\n')

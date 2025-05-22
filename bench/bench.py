@@ -63,7 +63,7 @@ for sparse_ratio in {0.2,0.3,0.5}:
             k_scale = torch.randn(batch, head, (seq_len+WARP_K-1) // WARP_K * 4, dtype=torch.float).cuda()
         
         v = torch.randint(-100, 100,(batch, head, seq_len, headdim), dtype=torch.int8).cuda()
-        o_int8 = torch.empty(batch, head, seq_len, headdim, dtype=torch.float16).cuda()
+        o_int8 = torch.empty(batch, head, seq_len, headdim, dtype=torch.bfloat16).cuda()
         sm_scale = 1 / (headdim ** 0.5)
         if(args.pv_accum_dtype=='fp16'):
             for i in range(5): kernel_int8(q, k, v.to(torch.float16), o_int8, q_scale, k_scale, 1, _is_causal, _qk_quant_gran, sm_scale, 0, sparse)

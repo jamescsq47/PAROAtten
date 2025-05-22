@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 by PAROAttention team.
+ * Copyright (c) 2024 by SageAttention team.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -219,6 +219,8 @@
            ? min(kv_len, (bx + 1) * CTA_Q)
            : kv_len,
        CTA_K);
+    bool flag = sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads)];
+ 
    // load Q with predicate
    load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, Q_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_Q>(
      &Q_lane_base_ptr, Q_smem_offset_load, stride_seq_q, smem_Q, Q_load_idx_lane_base, qo_len);
@@ -242,8 +244,7 @@
    load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
      &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K, K_load_idx_lane_base, kv_len);
    cp_async::commit_group();
-   cp_async::wait_group<1>();
-   __syncthreads();
+ 
    float q_scale = Q_scale[q_scale_idx];
  
    float original_sm_scale = sm_scale;
@@ -255,99 +256,17 @@
    load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
      &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V, V_load_idx_lane_base, kv_len);
    cp_async::commit_group();
-
-   cp_async::wait_group<1>();
-   __syncthreads();
+ 
    K_load_idx_lane_base += CTA_K;
    V_load_idx_lane_base += CTA_K;
-  
-   //first iteration 
+ 
+ #pragma unroll
+   for (uint32_t iter = 1; iter < num_iterations - 1; iter++)
    {
-    // compute QK^T
-     if constexpr (num_tiles_qk_inner == 1)
+     if (flag == true)
      {
-       compute_int_qk<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_qk_inner, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, DTypeQK>(
-         smem_K, RS, RQ, K_smem_offset_mma);
-     }
-     else
-     {
-       compute_int_qk<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_qk_inner, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, DTypeQK>(
-         smem_Q, smem_K, RS, Q_smem_offset_mma, K_smem_offset_mma);
-     }
- 
-     float RS_f32[num_tiles_q][num_tiles_k][8];
- 
- #pragma unroll
-     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
-     {
- #pragma unroll
-       for (uint32_t fk = 0; fk < num_tiles_k; fk++)
-       {
- #pragma unroll
-         for (uint32_t k = 0; k < 8; k++)
-         {
-           RS_f32[fq][fk][k] = __int2float_rz(RS[fq][fk][k]);
-         }
-       }
-     }
- 
-     // do not apply causal mask and out of bound mask for these iterations
-     K_idx_lane_base += CTA_K;
- 
-     if constexpr (std::is_same<DTypeSVAccum, float>::value)
-     {
-       update_mdo<num_tiles_q, num_tiles_k, num_tiles_v, false, false, false>(RS_f32, RO, m, d, sm_scale);
-     }
-     else if constexpr (std::is_same<DTypeSVAccum, half>::value)
-     {
-       update_mdo<num_tiles_q, num_tiles_k, num_tiles_v, true, false, false>(RS_f32, RO, m, d, sm_scale);
-     }
- 
-     if constexpr (DenominatorAccumUnit == ComputeUnit::kCudaCore)
-     {
-       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kCudaCore>(RS_f32, d);
-     }
- 
-     uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
-     RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
- 
-     if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
-     {
-       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
-     }
-
-     cp_async::wait_group<1>();
-     __syncthreads();
- 
-     if constexpr (!use_inst_buffer)
-     {
-       compute_fp16_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-         smem_V, RS_f16, RO, d, V_smem_offset_mma);
-     }
-     else
-     {
-       compute_fp16_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
-         smem_V, RS_f16, RO, d, V_smem_offset_mma); 
-     }
- 
-     __syncthreads();
-     }
- 
- #pragma unroll
-   for (uint32_t iter = 2; iter < num_iterations; iter++)
-   {
-     if (sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads)+iter-1] == true)
-     {
-    // load K
-    load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
-      &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K);
-    cp_async::commit_group();
-    K_load_idx_lane_base += CTA_K; 
- 
-     dequant_scale = q_scale * K_scale[k_scale_idx + (iter-1) * k_scale_advance_offset];
-     sm_scale = original_sm_scale * dequant_scale;
-     
-      // ensure K is ready
+      flag = sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads)+iter];
+     // ensure K is ready
      cp_async::wait_group<1>();
      __syncthreads();
  
@@ -403,15 +322,24 @@
      {
        accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
      }
-     
+ 
      __syncthreads();
-        
-     // load V
-     load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
-        &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V);
+ 
+     // load K
+    //  if(flag){
+      load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
+        &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K);
       cp_async::commit_group();
-     V_load_idx_lane_base += CTA_K;
-
+    //  }
+    //  else{
+    //   K_lane_base_ptr +=  CTA_K * stride_seq_k;
+    //  }
+    K_load_idx_lane_base += CTA_K;
+     
+ 
+     dequant_scale = q_scale * K_scale[k_scale_idx + iter * k_scale_advance_offset];
+     sm_scale = original_sm_scale * dequant_scale;
+ 
      // ensure V is ready
      cp_async::wait_group<1>();
      __syncthreads();
@@ -428,27 +356,152 @@
      }
  
      __syncthreads();
+     // load V
+    //  if(flag){
+      load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
+        &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V);
+      cp_async::commit_group();
+    //  }
+    //  else{
+    //   V_lane_base_ptr +=  CTA_K * stride_seq_v;
+    //  }
+    
+     V_load_idx_lane_base += CTA_K;
      }
      else{
-      K_lane_base_ptr +=  CTA_K * stride_seq_k;
-      V_lane_base_ptr +=  CTA_K * stride_seq_v;
+       flag = sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads)+iter];
+        load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
+          &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K,flag);
+        cp_async::commit_group();
+        load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
+          &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V,flag);
+        cp_async::commit_group();
+        // K_lane_base_ptr +=  CTA_K * stride_seq_k;
+        // V_lane_base_ptr +=  CTA_K * stride_seq_v;
+      
       K_load_idx_lane_base += CTA_K;
+      dequant_scale = q_scale * K_scale[k_scale_idx + iter * k_scale_advance_offset];
+      sm_scale = original_sm_scale * dequant_scale;
       V_load_idx_lane_base += CTA_K;
       K_idx_lane_base += CTA_K;
      }
    }
-
-   // last iter, apply causal mask and out of bound mask
-   if(sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads) + num_iterations-1] == true)
+   
+   // second last iter, apply causal mask
+   if (num_iterations > 1 && sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads)+num_iterations-1-1] == true)
    {
+     // ensure K is ready
+     cp_async::wait_group<1>();
+     __syncthreads();
+ 
+     // compute QK^T
+     if constexpr (num_tiles_qk_inner == 1)
+     {
+       compute_int_qk<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_qk_inner, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, DTypeQK>(
+         smem_K, RS, RQ, K_smem_offset_mma);
+     }
+     else
+     {
+       compute_int_qk<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_qk_inner, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, DTypeQK>(
+         smem_Q, smem_K, RS, Q_smem_offset_mma, K_smem_offset_mma);
+     }
+ 
+     float RS_f32[num_tiles_q][num_tiles_k][8];
+ 
+ #pragma unroll
+     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
+     {
+ #pragma unroll
+       for (uint32_t fk = 0; fk < num_tiles_k; fk++)
+       {
+ #pragma unroll
+         for (uint32_t k = 0; k < 8; k++)
+         {
+           RS_f32[fq][fk][k] = __int2float_rz(RS[fq][fk][k]) * dequant_scale;
+         }
+       }
+     }
+ 
+     if constexpr (mask_mode == MaskMode::kCausal)
+     {
+       apply_causal_mask<num_tiles_q, num_tiles_k>(Q_idx_lane_base, K_idx_lane_base, RS_f32);
+     }
+     // apply_out_of_bound_mask<num_tiles_q, num_tiles_k>(K_idx_lane_base, RS_f32, kv_len);
+     K_idx_lane_base += CTA_K;
+ 
+     if constexpr (std::is_same<DTypeSVAccum, float>::value)
+     {
+       update_mdo<num_tiles_q, num_tiles_k, num_tiles_v, false, false, false>(RS_f32, RO, m, d, original_sm_scale);
+     }
+     else if constexpr (std::is_same<DTypeSVAccum, half>::value)
+     {
+       update_mdo<num_tiles_q, num_tiles_k, num_tiles_v, true, false, false>(RS_f32, RO, m, d, original_sm_scale);
+     }
+ 
+     if constexpr (DenominatorAccumUnit == ComputeUnit::kCudaCore)
+     {
+       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kCudaCore>(RS_f32, d);
+     }
+ 
+     uint32_t RS_f16[num_tiles_q][num_tiles_k][4];
+     RS_32_to_16<num_tiles_q, num_tiles_k>(RS_f32, RS_f16);
+ 
+     if constexpr (DenominatorAccumUnit == ComputeUnit::kTensorCore)
+     {
+       accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
+     }
+ 
+     __syncthreads();
+ 
      // load K with predicate
      load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
        &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K, K_load_idx_lane_base, kv_len);
      cp_async::commit_group();
-      K_load_idx_lane_base += CTA_K;
  
      dequant_scale = q_scale * K_scale[k_scale_idx + (num_iterations - 1) * k_scale_advance_offset];
      sm_scale = original_sm_scale * dequant_scale;
+ 
+     // ensure V is ready
+     cp_async::wait_group<1>();
+     __syncthreads();
+ 
+     if constexpr (!use_inst_buffer)
+     {
+       compute_fp16_sv_permuted<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
+         smem_V, RS_f16, RO, d, V_smem_offset_mma);
+     }
+     else
+     {
+       compute_fp16_sv_permuted_inst_buf<num_warps_q, num_warps_k, num_tiles_q, num_tiles_k, num_tiles_v, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, 4>(
+         smem_V, RS_f16, RO, d, V_smem_offset_mma);
+     }
+ 
+     __syncthreads();
+     // load V with predicate
+     load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
+       &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V, V_load_idx_lane_base, kv_len);
+     cp_async::commit_group();
+     K_load_idx_lane_base += CTA_K;
+     V_load_idx_lane_base += CTA_K;
+   }
+   else{
+    load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
+      &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K, K_load_idx_lane_base, kv_len);
+    cp_async::commit_group();
+
+    dequant_scale = q_scale * K_scale[k_scale_idx + (num_iterations - 1) * k_scale_advance_offset];
+    sm_scale = original_sm_scale * dequant_scale;
+    load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
+      &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V, V_load_idx_lane_base, kv_len);
+    cp_async::commit_group();
+    K_idx_lane_base += CTA_K;
+    K_load_idx_lane_base += CTA_K;
+    V_load_idx_lane_base += CTA_K;
+   }
+
+   // last iter, apply causal mask and out of bound mask
+   if(sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads)+num_iterations-1] == true)
+   {
      // ensure K is ready
      cp_async::wait_group<1>();
      __syncthreads();
@@ -510,13 +563,7 @@
      {
        accumulate_d<num_tiles_q, num_tiles_k, ComputeUnit::kTensorCore>(RS_f16, d);
      }
-     
-     // load V with predicate
-     load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
-       &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V, V_load_idx_lane_base, kv_len);
-     cp_async::commit_group();
-     V_load_idx_lane_base += CTA_K;
-     
+ 
      // ensure V is ready
      cp_async::wait_group<0>();
      __syncthreads();
