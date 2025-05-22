@@ -82,18 +82,19 @@ def paroattn_convert(pipe):
     # timestep and i_block needs to be passed to each block. (in main.py this file.)
     
     # INFO: the atteniton needs to have i_timestep & i_block(could be here.), how to feed in?
-    import ipdb; ipdb.set_trace()
-    pipe.transformer.transformer_blocks[0].attn1.sparse_mask_cpu = sparse_mask.to(torch.bool)
-    # init the double buffer to all blocks.
-    
+    # import ipdb; ipdb.set_trace()
+    for b in range(42):
+        pipe.transformer.transformer_blocks[b].attn1.sparse_mask_gpu = sparse_mask.to(torch.bool).cuda()
+        # init the double buffer to all blocks.
+        
 
-    # INFO: also init the i_timestep = 0, since the callback is on_step_end.
-    pipe.transformer.transformer_blocks[0].attn1.i_timestep = 0 
-    # INFO: init the i_block for each block. 
-    
-    # replace the layernorm & rope, to add reoreder & inv reorder.
-    # call the from_float() func, or just inherit (replace definition, no need for replacement here)
-    pipe.transformer.transformer_blocks[0].norm1.permute_plan = permute_plan
+        # INFO: also init the i_timestep = 0, since the callback is on_step_end.
+        pipe.transformer.transformer_blocks[b].attn1.i_timestep = 0 
+        # INFO: init the i_block for each block. 
+        
+        # replace the layernorm & rope, to add reoreder & inv reorder.
+        # call the from_float() func, or just inherit (replace definition, no need for replacement here)
+        pipe.transformer.transformer_blocks[b].norm1.permute_plan = permute_plan
 
     pass
     
