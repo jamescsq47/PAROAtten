@@ -26,6 +26,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m){
   // ops: add residual
   m.def("add_residual", &add_residual);
   m.def("rope_permutation", &rope_permutation);
+  m.def("fused_apply_rotary_cuda", &fused_apply_rotary_cuda);
   // ops: fused add residual and norm
   m.def("residual_rmsnorm", &residual_rmsnorm);
   m.def("residual_layernorm", &residual_layernorm);
