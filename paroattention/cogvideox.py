@@ -13,10 +13,13 @@ from paroattention.core import paroattn
 import paroattention._qattn_sm80 as qattn
 from .quant import per_block_int8 as per_block_int8_cuda
 from .quant import per_warp_int8 as per_warp_int8_cuda
+import sageattention._qattn_sm80 as qattn_sage
+import torch.cuda as cuda
 
 kernel_paro = qattn.qk_int8_sv_f16_accum_f16_attn
+kernel_sage = qattn_sage.qk_int8_sv_f16_accum_f16_attn
 
-def permute_qk(query, key, value):
+def permute_qk(query, key, value, permute_plan, i_block):
     # (F,W,H) -> (Frame, With, Height) 
     # (17776-226) == 13*30*45
     n_text_tokens = 226
@@ -41,8 +44,6 @@ def permute_qk(query, key, value):
             [2, 0, 1],  # 5: WFH
     ])
 
-    i_block = 1
-
     permute_order_index = permute_plan['permute'][i_block]  # i_block is initialized during creating block in `transformer_3d.py`
     permute_orders = torch.stack([permutations[i.item()] for i in permute_order_index], dim=0)  # [N_head,3]
     
@@ -60,7 +61,7 @@ def permute_qk(query, key, value):
     
     return query, key, value
     
-def permute_attn_out(attn_out):
+def permute_attn_out(attn_out, permute_plan, i_block):
     n_text_tokens = 226
     
     BS, N_head, N_token, N_dim = attn_out.shape
@@ -71,8 +72,6 @@ def permute_attn_out(attn_out):
     H = 30
     W = 45
     assert N_image_token == F*W*H
-    
-    i_block = 1
 
     permute_order_index = permute_plan['permute'][i_block]  # i_block is initialized during creating block in `transformer_3d.py`
     permutations = torch.tensor([
@@ -120,22 +119,33 @@ class PARO_CogVideoXAttnProcessor2_0:
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError("CogVideoXAttnProcessor requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
 
+        self.events = {
+            'total_start': cuda.Event(enable_timing=True),
+            'total_end': cuda.Event(enable_timing=True),
+            'quant_start': cuda.Event(enable_timing=True),
+            'quant_end': cuda.Event(enable_timing=True),
+            'kernel_start': cuda.Event(enable_timing=True),
+            'kernel_end': cuda.Event(enable_timing=True),
+        }
+        self.time_accum = {
+            'total': 0.0,
+            'quant': 0.0,
+            'kernel': 0.0,
+            'permute': 0.0
+        }
+        self.call_count = 0
+
     def __call__(
         self,
         attn: Attention,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        sparse: Optional[torch.Tensor] = None,
-        permute_plan: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         
-        if sparse is None:
-            sparse = getattr(attn, "sparse_mask_gpu", None)
-
-        if permute_plan is None:
-            permute_plan = getattr(attn, "permute_plan", None)
+        sparse = self.sparse_mask_gpu
+        permute_plan = self.permute_plan
 
         text_seq_length = encoder_hidden_states.size(1)
 
@@ -146,6 +156,7 @@ class PARO_CogVideoXAttnProcessor2_0:
         if attention_mask is not None:
             attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
             attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+
 
         query = attn.to_q(hidden_states)
         key = attn.to_k(hidden_states)
@@ -178,27 +189,41 @@ class PARO_CogVideoXAttnProcessor2_0:
         
         # support prefetch and not.
         # import ipdb; ipdb.set_trace()
+        self.events['total_start'].record()
 
-        hidden_states = torch.empty((2, 48, 17776, 64), device = 'cuda', dtype=torch.float16)
-
-        
+        hidden_states = torch.empty((2, 48, 17776, 64), device = 'cuda', dtype=torch.bfloat16)      
+        permute_qk(query, key, value, permute_plan, self.i_block)
         sm_scale = 1 / (head_dim ** 0.5)
         q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(query, key, BLKQ=64, WARPQ=32, BLKK=64, tensor_layout="HND")
 
-        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse) # tensor_layout,_is_causal, _qk_quant_gran
-        
-        print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device) # torch.Size([2, 17776, 3072])
+        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, torch.stack([sparse[self.i_timestep,self.i_block,:,:,:],sparse[self.i_timestep,self.i_block,:,:,:]],dim=0)) # tensor_layout,_is_causal, _qk_quant_gran
 
+        self.events['total_end'].record()
+        cuda.synchronize()
+        total_time = self.events['total_start'].elapsed_time(self.events['total_end'])
+        
+        # 累加统计
+        self.time_accum['total'] += total_time
+        permute_attn_out(hidden_states, permute_plan, self.i_block)
+
+        # kernel_sage(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0)
         # hidden_states = F.scaled_dot_product_attention(
         #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         # )
 
-        # print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device) # torch.Size([2, 48, 17776, 64])
+
+        if torch.isnan(hidden_states).any() or torch.isinf(hidden_states).any():
+            import ipdb; ipdb.set_trace()
+        # origin_hidden_states = F.scaled_dot_product_attention(
+        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        # )
+
 
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim).to(torch.bfloat16)
 
         # linear proj
-        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[0](hidden_states) 
+
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
 
@@ -206,6 +231,11 @@ class PARO_CogVideoXAttnProcessor2_0:
             [text_seq_length, hidden_states.size(1) - text_seq_length], dim=1
         )
 
-        print("hidden_states:", hidden_states.shape, hidden_states.dtype, hidden_states.device, hidden_states.stride())
 
         return hidden_states, encoder_hidden_states
+
+    def get_time_stats(self):
+        """获取统计信息"""
+        return {
+            'total_ms': self.time_accum['total']
+        }

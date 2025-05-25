@@ -1,4 +1,4 @@
-Metadata-Version: 2.2
+Metadata-Version: 2.1
 Name: paroattention
 Version: 0.0.1
 Summary: PAROAttention code adapted from SageAttention.
@@ -6,11 +6,6 @@ Author: PAROAttention team
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
 License-File: LICENSE.md
-Dynamic: author
-Dynamic: description
-Dynamic: description-content-type
-Dynamic: requires-python
-Dynamic: summary
 
 # PAROAttention (Hardware code)
 This package includes PAROAttention codes with quantization and sparsity implementation. We build PAROAttention based on the [SageAttention](https://github.com/thu-ml/SageAttention) code, and further integrate the tailored designs for $PV^{T}$ INT8 quantization and block-wise sparsity. Additionally, this package also includes the RoPE kernel with fused permutation mentioned in our paper. 
