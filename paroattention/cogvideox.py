@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.models.attention import Attention
 from paroattention.core import paroattn
-<<<<<<< HEAD
 import paroattention._qattn_sm80 as qattn
 from .quant import per_block_int8 as per_block_int8_cuda
 from .quant import per_warp_int8 as per_warp_int8_cuda
@@ -109,8 +108,6 @@ def permute_attn_out(attn_out, permute_plan, i_block):
     attn_out[:,:,n_text_tokens:,:] = attn_out_image_part
             
     return attn_out
-=======
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
 
 class PARO_CogVideoXAttnProcessor2_0:
     r"""
@@ -122,7 +119,6 @@ class PARO_CogVideoXAttnProcessor2_0:
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError("CogVideoXAttnProcessor requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
 
-<<<<<<< HEAD
         self.events = {
             'total_start': cuda.Event(enable_timing=True),
             'total_end': cuda.Event(enable_timing=True),
@@ -139,8 +135,6 @@ class PARO_CogVideoXAttnProcessor2_0:
         }
         self.call_count = 0
 
-=======
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
     def __call__(
         self,
         attn: Attention,
@@ -150,12 +144,9 @@ class PARO_CogVideoXAttnProcessor2_0:
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         
-<<<<<<< HEAD
         sparse = self.sparse_mask_gpu
         permute_plan = self.permute_plan
 
-=======
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
         text_seq_length = encoder_hidden_states.size(1)
 
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
@@ -166,10 +157,6 @@ class PARO_CogVideoXAttnProcessor2_0:
             attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
             attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
 
-<<<<<<< HEAD
-
-=======
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
         query = attn.to_q(hidden_states)
         key = attn.to_k(hidden_states)
         value = attn.to_v(hidden_states)
@@ -177,15 +164,9 @@ class PARO_CogVideoXAttnProcessor2_0:
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
 
-<<<<<<< HEAD
         query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2).contiguous()
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2).contiguous()
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2).contiguous()
-=======
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
 
         if attn.norm_q is not None:
             query = attn.norm_q(query)
