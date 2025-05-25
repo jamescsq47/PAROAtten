@@ -181,11 +181,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", type=str, default='./log')
     parser.add_argument("--cfg-scale", type=float, default=4.0)
-<<<<<<< HEAD
     parser.add_argument("--num-sampling-steps", type=int, default=30)
-=======
-    parser.add_argument("--num-sampling-steps", type=int, default=50)
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
     parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ckpt", type=str, default=None)
