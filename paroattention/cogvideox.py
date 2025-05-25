@@ -136,9 +136,6 @@ class PARO_CogVideoXAttnProcessor2_0:
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        
-        sparse = self.sparse_mask_gpu
-        permute_plan = self.permute_plan
 
         text_seq_length = encoder_hidden_states.size(1)
 
@@ -183,11 +180,17 @@ class PARO_CogVideoXAttnProcessor2_0:
         self.events['total_start'].record()
 
         hidden_states = torch.empty((2, 48, 17776, 64), device = 'cuda', dtype=torch.bfloat16)      
-        # permute_qk(query, key, value, permute_plan, self.i_block)
+        permute_qk(query, key, value, self.permute_plan, self.i_block)
         sm_scale = 1 / (head_dim ** 0.5)
         q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(query, key, BLKQ=64, WARPQ=32, BLKK=64, tensor_layout="HND")
-
-        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, torch.stack([sparse[self.i_timestep,self.i_block,:,:,:],sparse[self.i_timestep,self.i_block,:,:,:]],dim=0)) 
+        
+        if hasattr(self, "prefetch_stream"):
+            sparse_ = self.prefetch_stream.get_sparse_mask()
+            sparse_ = torch.stack([sparse_,sparse_],dim=0)
+        else:
+            sparse_ = torch.stack([self.sparse_mask[self.i_timestep,self.i_block],self.sparse_mask[self.i_timestep,self.i_block]],dim=0)
+            
+        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
 
         # use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.
 
@@ -199,12 +202,10 @@ class PARO_CogVideoXAttnProcessor2_0:
         cuda.synchronize()
         total_time = self.events['total_start'].elapsed_time(self.events['total_end'])
         self.time_accum['total'] += total_time
-        # permute_attn_out(hidden_states, permute_plan, self.i_block)
-
+        permute_attn_out(hidden_states, self.permute_plan, self.i_block)
 
         if torch.isnan(hidden_states).any() or torch.isinf(hidden_states).any():
             import ipdb; ipdb.set_trace()
-
 
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim).to(torch.bfloat16)
 

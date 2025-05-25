@@ -15,7 +15,7 @@ import diffusers
 from paroattention import PARO_CogVideoXAttnProcessor2_0
 diffusers.models.attention_processor.CogVideoXAttnProcessor2_0 = PARO_CogVideoXAttnProcessor2_0
 # --- replace definition. ---
-from paroattention.utils import TimestepCallback
+from paroattention.prefetch_utils import TimestepCallback, SparseMaskPrefetchStream
 # from paroattention.utils import LayerNormWithPermute, LayerNormWithInversePermute
 # F.scaled_dot_product_attention = paroattn
 # diffusers.apply_rotary_embedding = apply_rotary_embedding_with_permute
@@ -65,13 +65,13 @@ apply_rotary_embedding
 def paroattn_convert(pipe):
     
     # load the util files and config.
-    F = 13
-    H = 30
-    W = 45
-
-    sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
-    sparse_ratio = sparse_plan.sum() / sparse_plan.numel()
-    print(f"Sparse plan loaded with ratio: {sparse_ratio:.2f}")
+    # F = 13
+    # H = 30
+    # W = 45
+    
+    sparse_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/sparse_plan.pth", map_location='cpu')
+    permute_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/permute_plan.pth", map_location='cuda')
+    sparse_plan['sparse'] = F.pad(sparse_plan['sparse'], pad=(4, 0, 4, 0), mode='constant', value=1)
 
     # if you want to profile the speed of a given sparse ratio, you can use the code under this comment and change the sparse_ratio value. But notice that the video generated will be meaningless.
 
@@ -84,13 +84,20 @@ def paroattn_convert(pipe):
     # sparse_plan[..., -1] = 1
     # sparse_ratio = sparse_plan.sum() / numel
     # print(f"Sparse plan loaded with ratio: {sparse_ratio:.2f}")
-    permute_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth', map_location='cuda')
+    
+    # sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
+    # permute_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth', map_location='cuda')
     
     # init the sparse_plan & permute plan.
-    sparse_mask = sparse_plan  # [10, 42, 48, 278, 278] # torch.ones((10, 42, 48, 278, 278)).cpu() 
+    sparse_mask = sparse_plan['sparse'].bool()  # [10, 42, 48, 278, 278] # torch.ones((10, 42, 48, 278, 278)).cpu() 
     empty_head = (~permute_plan['empty'].bool()).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).cpu()  # [42, 48]
     # sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
     permute_order = permute_plan['permute']  # [42, 48]
+
+    sparse_mask[:,:,:,:,-1] = True
+    sparse_mask[:,:,:,-1,:] = True
+    sparse_ratio = sparse_mask.sum() / sparse_mask.numel()
+    print(f"Sparse plan loaded with ratio: {sparse_ratio:.2f}")
 
     # replace the attention. init sparse mask. (on CPU.)
     # the sparse mask is loaded to each block through prefetch in PAROAttention class.
@@ -99,28 +106,36 @@ def paroattn_convert(pipe):
     # INFO: the atteniton needs to have i_timestep & i_block(could be here.), how to feed in?
     # import ipdb; ipdb.set_trace()
 
-    sparse_mask_gpu = sparse_mask.to(torch.bool).cuda()
+    if not args.prefetch:
+        # move to GPU.
+        sparse_mask = sparse_mask.cuda()
+    else:
+        prefetch_stream = SparseMaskPrefetchStream(sparse_mask)
+        
     # init the double buffer to all blocks.
-    
-    for b in range(42):
-        pipe.transformer.transformer_blocks[b].attn1.processor.sparse_mask_gpu = sparse_mask_gpu
+    for i_block in range(len(pipe.transformer.transformer_blocks)):
+        if not args.prefetch:
+            pipe.transformer.transformer_blocks[i_block].attn1.processor.sparse_mask = sparse_mask
+        else:
+            pipe.transformer.transformer_blocks[i_block].attn1.processor.prefetch_stream = prefetch_stream
+            
         # init the double buffer to all blocks.
 
         # INFO: also init the i_timestep = 0, since the callback is on_step_end.
-        pipe.transformer.transformer_blocks[b].attn1.processor.i_timestep = 0 
+        pipe.transformer.transformer_blocks[i_block].attn1.processor.i_timestep = 0 
 
-        pipe.transformer.transformer_blocks[b].attn1.processor.i_block = b
+        pipe.transformer.transformer_blocks[i_block].attn1.processor.i_block = i_block
         # INFO: init the i_block for each block. 
         
         # replace the layernorm & rope, to add reoreder & inv reorder.
         # call the from_float() func, or just inherit (replace definition, no need for replacement here)
-        pipe.transformer.transformer_blocks[b].attn1.processor.permute_plan = permute_plan
+        pipe.transformer.transformer_blocks[i_block].attn1.processor.permute_plan = permute_plan
 
         # INFO: DIRTY, reparam a few weights for numerical stability.
         weight_rep_constant = 8.
-        pipe.transformer.transformer_blocks[b].attn1.to_v.weight.div_(weight_rep_constant)
-        pipe.transformer.transformer_blocks[b].attn1.to_v.bias.div_(weight_rep_constant)
-        pipe.transformer.transformer_blocks[b].attn1.to_out[0].weight.mul_(weight_rep_constant)        
+        pipe.transformer.transformer_blocks[i_block].attn1.to_v.weight.div_(weight_rep_constant)
+        pipe.transformer.transformer_blocks[i_block].attn1.to_v.bias.div_(weight_rep_constant)
+        pipe.transformer.transformer_blocks[i_block].attn1.to_out[0].weight.mul_(weight_rep_constant)
     pass
     
 
@@ -152,7 +167,7 @@ def main(args):
 
     for i, prompt in enumerate(prompts):
         # 创建TimestepCallback实例，传入num_timestep_for_sparse_mask参数
-        timestep_callback = TimestepCallback(num_timestep_for_sparse_mask=10)
+        timestep_callback = TimestepCallback(num_timestep_for_sparse_mask=30)
         
         video = pipe(
             prompt=prompt,
@@ -171,11 +186,13 @@ def main(args):
             total_time += stats['total_ms']
         print(f"Total attention time: {total_time:.2f} ms")
         
-        print(f"Export video to output_{i}.mp4")
         save_path = os.path.join(args.log, "generated_videos")
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        export_to_video(video, os.path.join(save_path, f"output_{i}.mp4"), fps=8)
+
+        outpath = os.path.join(save_path, f"output_{i}_paro_sparse.mp4")
+        export_to_video(video, outpath, fps=8)
+        print(f"Export video to {outpath}")
 
 
 
@@ -188,6 +205,6 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ckpt", type=str, default=None)
-    parser.add_argument("--sage_attn", action="store_true")
+    parser.add_argument("--prefetch", action="store_true")
     args = parser.parse_args()
     main(args)
