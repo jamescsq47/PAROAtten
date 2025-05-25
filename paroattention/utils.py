@@ -1,5 +1,8 @@
 from diffusers.callbacks import PipelineCallback
+<<<<<<< HEAD
 import torch
+=======
+>>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
 
 class TimestepCallback(PipelineCallback):
     """
