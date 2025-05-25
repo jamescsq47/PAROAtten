@@ -68,34 +68,54 @@ def paroattn_convert(pipe):
     F = 13
     H = 30
     W = 45
-    sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
+
+    # sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
+    sparse_plan = torch.zeros((10, 42, 48, 278, 278)).cpu()  # [10, 42, 48, 278, 278] 
+    numel = sparse_plan.numel()
+    num_ones = int(numel * 0.3)
+    indices = torch.randperm(numel)[:num_ones]
+    sparse_plan.view(-1)[indices] = 1
+    sparse_plan[..., -1] = 1
+    sparse_ratio = sparse_plan.sum() / numel
+    print(f"Sparse plan loaded with ratio: {sparse_ratio:.2f}")
+
     permute_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth', map_location='cuda')
     
     # init the sparse_plan & permute plan.
     sparse_mask = sparse_plan  # [10, 42, 48, 278, 278] # torch.ones((10, 42, 48, 278, 278)).cpu() 
     empty_head = (~permute_plan['empty'].bool()).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).cpu()  # [42, 48]
-    sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
+    # sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
     permute_order = permute_plan['permute']  # [42, 48]
-    
+
     # replace the attention. init sparse mask. (on CPU.)
     # the sparse mask is loaded to each block through prefetch in PAROAttention class.
     # timestep and i_block needs to be passed to each block. (in main.py this file.)
     
     # INFO: the atteniton needs to have i_timestep & i_block(could be here.), how to feed in?
     # import ipdb; ipdb.set_trace()
+
+    sparse_mask_gpu = sparse_mask.to(torch.bool).cuda()
+    # init the double buffer to all blocks.
+    
     for b in range(42):
-        pipe.transformer.transformer_blocks[b].attn1.sparse_mask_gpu = sparse_mask.to(torch.bool).cuda()
+        pipe.transformer.transformer_blocks[b].attn1.processor.sparse_mask_gpu = sparse_mask_gpu
         # init the double buffer to all blocks.
-        
 
         # INFO: also init the i_timestep = 0, since the callback is on_step_end.
-        pipe.transformer.transformer_blocks[b].attn1.i_timestep = 0 
+        pipe.transformer.transformer_blocks[b].attn1.processor.i_timestep = 0 
+
+        pipe.transformer.transformer_blocks[b].attn1.processor.i_block = b
         # INFO: init the i_block for each block. 
         
         # replace the layernorm & rope, to add reoreder & inv reorder.
         # call the from_float() func, or just inherit (replace definition, no need for replacement here)
-        pipe.transformer.transformer_blocks[b].norm1.permute_plan = permute_plan
+        pipe.transformer.transformer_blocks[b].attn1.processor.permute_plan = permute_plan
 
+        # INFO: DIRTY, reparam a few weights for numerical stability.
+        weight_rep_constant = 8.
+        pipe.transformer.transformer_blocks[b].attn1.to_v.weight.div_(weight_rep_constant)
+        pipe.transformer.transformer_blocks[b].attn1.to_v.bias.div_(weight_rep_constant)
+        pipe.transformer.transformer_blocks[b].attn1.to_out[0].weight.mul_(weight_rep_constant)        
     pass
     
 
@@ -139,12 +159,20 @@ def main(args):
             callback_on_step_end=timestep_callback.on_step_end,
             callback_on_step_end_tensor_inputs=["latents"],
         ).frames[0]
+
+        total_time = 0.0
+        for b in range(42):
+            stats = pipe.transformer.transformer_blocks[b].attn1.processor.get_time_stats()
+            total_time += stats['total_ms']
+            print(f"Block {b} attention时间统计:", stats)
+        print(f"Total attention time: {total_time:.2f} ms")
+
         
         print(f"Export video to output_{i}.mp4")
         save_path = os.path.join(args.log, "generated_videos")
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        export_to_video(video, os.path.join(save_path, f"output_{i}.mp4"), fps=8)
+        export_to_video(video, os.path.join(save_path, f"output_{i}_paro_sparse.mp4"), fps=8)
 
 
 
@@ -153,7 +181,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", type=str, default='./log')
     parser.add_argument("--cfg-scale", type=float, default=4.0)
-    parser.add_argument("--num-sampling-steps", type=int, default=50)
+    parser.add_argument("--num-sampling-steps", type=int, default=30)
     parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ckpt", type=str, default=None)
