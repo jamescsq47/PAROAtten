@@ -1,0 +1,3 @@
+transformers==4.34.0
+hiq-python==1.1.9
+sentencepiece==0.1.99
