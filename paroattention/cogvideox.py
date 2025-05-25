@@ -122,16 +122,9 @@ class PARO_CogVideoXAttnProcessor2_0:
         self.events = {
             'total_start': cuda.Event(enable_timing=True),
             'total_end': cuda.Event(enable_timing=True),
-            'quant_start': cuda.Event(enable_timing=True),
-            'quant_end': cuda.Event(enable_timing=True),
-            'kernel_start': cuda.Event(enable_timing=True),
-            'kernel_end': cuda.Event(enable_timing=True),
         }
         self.time_accum = {
             'total': 0.0,
-            'quant': 0.0,
-            'kernel': 0.0,
-            'permute': 0.0
         }
         self.call_count = 0
 
@@ -187,7 +180,6 @@ class PARO_CogVideoXAttnProcessor2_0:
         """
         
         # support prefetch and not.
-        # import ipdb; ipdb.set_trace()
         self.events['total_start'].record()
 
         hidden_states = torch.empty((2, 48, 17776, 64), device = 'cuda', dtype=torch.bfloat16)      
@@ -195,27 +187,23 @@ class PARO_CogVideoXAttnProcessor2_0:
         sm_scale = 1 / (head_dim ** 0.5)
         q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(query, key, BLKQ=64, WARPQ=32, BLKK=64, tensor_layout="HND")
 
-        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, torch.stack([sparse[self.i_timestep,self.i_block,:,:,:],sparse[self.i_timestep,self.i_block,:,:,:]],dim=0)) # tensor_layout,_is_causal, _qk_quant_gran
+        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, torch.stack([sparse[self.i_timestep,self.i_block,:,:,:],sparse[self.i_timestep,self.i_block,:,:,:]],dim=0)) 
 
-        self.events['total_end'].record()
-        cuda.synchronize()
-        total_time = self.events['total_start'].elapsed_time(self.events['total_end'])
-        
-        # 累加统计
-        self.time_accum['total'] += total_time
-        # permute_attn_out(hidden_states, permute_plan, self.i_block)
+        # use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.
 
-        # kernel_sage(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0)
         # hidden_states = F.scaled_dot_product_attention(
         #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         # )
 
+        self.events['total_end'].record()
+        cuda.synchronize()
+        total_time = self.events['total_start'].elapsed_time(self.events['total_end'])
+        self.time_accum['total'] += total_time
+        # permute_attn_out(hidden_states, permute_plan, self.i_block)
+
 
         if torch.isnan(hidden_states).any() or torch.isinf(hidden_states).any():
             import ipdb; ipdb.set_trace()
-        # origin_hidden_states = F.scaled_dot_product_attention(
-        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-        # )
 
 
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim).to(torch.bfloat16)
@@ -234,7 +222,6 @@ class PARO_CogVideoXAttnProcessor2_0:
         return hidden_states, encoder_hidden_states
 
     def get_time_stats(self):
-        """获取统计信息"""
         return {
             'total_ms': self.time_accum['total']
         }

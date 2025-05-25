@@ -69,16 +69,21 @@ def paroattn_convert(pipe):
     H = 30
     W = 45
 
-    # sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
-    sparse_plan = torch.zeros((10, 42, 48, 278, 278)).cpu()  # [10, 42, 48, 278, 278] 
-    numel = sparse_plan.numel()
-    num_ones = int(numel * 0.3)
-    indices = torch.randperm(numel)[:num_ones]
-    sparse_plan.view(-1)[indices] = 1
-    sparse_plan[..., -1] = 1
-    sparse_ratio = sparse_plan.sum() / numel
+    sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
+    sparse_ratio = sparse_plan.sum() / sparse_plan.numel()
     print(f"Sparse plan loaded with ratio: {sparse_ratio:.2f}")
 
+    # if you want to profile the speed of a given sparse ratio, you can use the code under this comment and change the sparse_ratio value. But notice that the video generated will be meaningless.
+
+    # sparse_plan = torch.zeros((10, 42, 48, 278, 278)).cpu()  # [10, 42, 48, 278, 278] 
+    # sparse_ratio = 0.3
+    # numel = sparse_plan.numel()
+    # num_ones = int(numel * sparse_ratio)
+    # indices = torch.randperm(numel)[:num_ones]
+    # sparse_plan.view(-1)[indices] = 1
+    # sparse_plan[..., -1] = 1
+    # sparse_ratio = sparse_plan.sum() / numel
+    # print(f"Sparse plan loaded with ratio: {sparse_ratio:.2f}")
     permute_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth', map_location='cuda')
     
     # init the sparse_plan & permute plan.
@@ -164,15 +169,13 @@ def main(args):
         for b in range(42):
             stats = pipe.transformer.transformer_blocks[b].attn1.processor.get_time_stats()
             total_time += stats['total_ms']
-            print(f"Block {b} attention时间统计:", stats)
         print(f"Total attention time: {total_time:.2f} ms")
-
         
         print(f"Export video to output_{i}.mp4")
         save_path = os.path.join(args.log, "generated_videos")
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        export_to_video(video, os.path.join(save_path, f"output_{i}_paro_sparse.mp4"), fps=8)
+        export_to_video(video, os.path.join(save_path, f"output_{i}.mp4"), fps=8)
 
 
 
