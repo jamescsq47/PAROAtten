@@ -493,7 +493,6 @@ diff = torch.abs(kernel_out - out)
 mean_diff = torch.mean(diff)
 print(f"Mean difference: {mean_diff.item()}")
 cos_sim = torch.cosine_similarity(kernel_out, out, dim=3)  #[1, 48, 17762]
-<<<<<<< HEAD
 print(f"Mean cosin similarity: {torch.mean(cos_sim)}\n")
 # dense_kernel_out = sage_out
 
@@ -507,6 +506,3 @@ for sparse_ratio in {0.2, 0.3, 0.5}:
     print(f'PARO: sparse ratio:{sparse_ratio}, latency:{time_paro.mean*1e3}ms, flops: {flops/time_paro.mean*1e-12}TFLOPs/s')      
     print("   *sparse ratio means the ratio of calculated elements to all elements in the attention map")
     print(f'overhead of PARO attention: {time_paro_quant.mean*1e3}, which equals to {time_paro_quant.mean/time_paro.mean} of the GEMM time\n')
-=======
-print(f"Mean cosin similarity: {torch.mean(cos_sim)}")
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8

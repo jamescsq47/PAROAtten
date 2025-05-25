@@ -22,7 +22,6 @@ from paroattention.utils import TimestepCallback
 # -----------------------
 from diffusers import CogVideoXPipeline
 from diffusers.utils import export_to_video
-<<<<<<< HEAD
 # from qdiff.utils import apply_func_to_submodules, seed_everything, setup_logging
 
 import numpy as np
@@ -34,9 +33,6 @@ def seed_everything(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-=======
-from qdiff.utils import apply_func_to_submodules, seed_everything, setup_logging
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
 
 '''
 input: F,H,W: fixed as standard.
@@ -72,7 +68,6 @@ def paroattn_convert(pipe):
     F = 13
     H = 30
     W = 45
-<<<<<<< HEAD
 
     # sparse_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/kernel_sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
     sparse_plan = torch.zeros((10, 42, 48, 278, 278)).cpu()  # [10, 42, 48, 278, 278] 
@@ -92,23 +87,11 @@ def paroattn_convert(pipe):
     # sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
     permute_order = permute_plan['permute']  # [42, 48]
 
-=======
-    sparse_plan = torch.load('./sparse_plan.pth', map_location='cpu')  # load on cpu to avoid large GPU memory cost.
-    permute_plan = torch.load('./permute_plan.pth', map_location='cuda')
-    
-    # init the sparse_plan & permute plan.
-    sparse_mask = sparse_plan['sparse']  # [10, 42, 48, 278, 278]
-    empty_head = (~permute_plan['empty'].bool()).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)  # [42, 48]
-    sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
-    permute_order = permute_plan['permute']  # [42, 48]
-    
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
     # replace the attention. init sparse mask. (on CPU.)
     # the sparse mask is loaded to each block through prefetch in PAROAttention class.
     # timestep and i_block needs to be passed to each block. (in main.py this file.)
     
     # INFO: the atteniton needs to have i_timestep & i_block(could be here.), how to feed in?
-<<<<<<< HEAD
     # import ipdb; ipdb.set_trace()
 
     sparse_mask_gpu = sparse_mask.to(torch.bool).cuda()
@@ -133,21 +116,6 @@ def paroattn_convert(pipe):
         pipe.transformer.transformer_blocks[b].attn1.to_v.weight.div_(weight_rep_constant)
         pipe.transformer.transformer_blocks[b].attn1.to_v.bias.div_(weight_rep_constant)
         pipe.transformer.transformer_blocks[b].attn1.to_out[0].weight.mul_(weight_rep_constant)        
-=======
-    import ipdb; ipdb.set_trace()
-    pipe.transformer.transformer_blocks[0].attn.sparse_mask_cpu = sparse_mask   
-    # init the double buffer to all blocks.
-    
-
-    # INFO: also init the i_timestep = 0, since the callback is on_step_end.
-    pipe.transformer.transformer_blocks[0].attn.i_timestep = 0 
-    # INFO: init the i_block for each block. 
-    
-    # replace the layernorm & rope, to add reoreder & inv reorder.
-    # call the from_float() func, or just inherit (replace definition, no need for replacement here)
-    pipe.transformer.transformer_blocks[0].attn.norm1.permute_plan = permute_plan
-
->>>>>>> fef02d9092a8f611c0bb2191a66d5525c9a927f8
     pass
     
 
@@ -192,12 +160,12 @@ def main(args):
             callback_on_step_end_tensor_inputs=["latents"],
         ).frames[0]
 
-        # total_time = 0.0
-        # for b in range(42):
-        #     stats = pipe.transformer.transformer_blocks[b].attn1.processor.get_time_stats()
-        #     total_time += stats['total_ms']
-        #     print(f"Block {b} attention时间统计:", stats)
-        # print(f"Total attention time: {total_time:.2f} ms")
+        total_time = 0.0
+        for b in range(42):
+            stats = pipe.transformer.transformer_blocks[b].attn1.processor.get_time_stats()
+            total_time += stats['total_ms']
+            print(f"Block {b} attention时间统计:", stats)
+        print(f"Total attention time: {total_time:.2f} ms")
 
         
         print(f"Export video to output_{i}.mp4")
