@@ -190,13 +190,13 @@ class PARO_CogVideoXAttnProcessor2_0:
         else:
             sparse_ = torch.stack([self.sparse_mask[self.i_timestep,self.i_block],self.sparse_mask[self.i_timestep,self.i_block]],dim=0)
             
-        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
-
-        # use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.
-
-        # hidden_states = F.scaled_dot_product_attention(
-        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-        # )
+        if self.i_timestep >= 10:
+            kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
+        else:
+            # INFO: use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.
+            hidden_states = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+            )
 
         self.events['total_end'].record()
         cuda.synchronize()

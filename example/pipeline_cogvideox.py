@@ -69,9 +69,14 @@ def paroattn_convert(pipe):
     # H = 30
     # W = 45
     
-    sparse_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/sparse_plan.pth", map_location='cpu')
-    permute_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/permute_plan.pth", map_location='cuda')
-    sparse_plan['sparse'] = F.pad(sparse_plan['sparse'], pad=(4, 0, 4, 0), mode='constant', value=1)
+    sparse_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/sparse_plan.pth", map_location='cpu', weights_only=True)
+    permute_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/permute_plan.pth", map_location='cuda', weights_only=True)
+    
+    sparse_mask = sparse_plan['sparse'].bool()  # [10, 42, 48, 278, 278] # torch.ones((10, 42, 48, 278, 278)).cpu() 
+    empty_head = (~permute_plan['empty'].bool()).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).cpu()  # [42, 48]
+    # sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
+
+    sparse_mask = F.pad(sparse_mask, pad=(4, 0, 4, 0), mode='constant', value=1)  # for text embed.
 
     # if you want to profile the speed of a given sparse ratio, you can use the code under this comment and change the sparse_ratio value. But notice that the video generated will be meaningless.
 
@@ -89,10 +94,8 @@ def paroattn_convert(pipe):
     # permute_plan = torch.load('/home/xieruiqi/diffuser-dev520/examples/cogvideo_attn/logs/calib_data/0.49_0.015_1/permute_plan.pth', map_location='cuda')
     
     # init the sparse_plan & permute plan.
-    sparse_mask = sparse_plan['sparse'].bool()  # [10, 42, 48, 278, 278] # torch.ones((10, 42, 48, 278, 278)).cpu() 
-    empty_head = (~permute_plan['empty'].bool()).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).cpu()  # [42, 48]
-    # sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
-    permute_order = permute_plan['permute']  # [42, 48]
+
+    # permute_order = permute_plan['permute']  # [42, 48]
 
     sparse_mask[:,:,:,:,-1] = True
     sparse_mask[:,:,:,-1,:] = True
