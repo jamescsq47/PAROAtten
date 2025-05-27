@@ -1,9 +1,0 @@
-
-NOTICE: Existing SQLite export found: paro_profile.sqlite
-        It is assumed file was previously exported from: paro_profile.nsys-rep
-        Consider using --force-export=true if needed.
-
-Processing [paro_profile.sqlite] with [/usr/local/cuda-12.2/nsight-systems-2023.2.3/host-linux-x64/reports/nvtx_sum.py]... 
-Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
-100.0,324189652,1260,257293.4,205538.0,195202,53286273,1496419.4,PushPop,PARO_Attention
-

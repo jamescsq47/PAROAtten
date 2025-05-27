@@ -1,20 +1,23 @@
 # PAROAttention (Hardware code)
-This package includes PAROAttention codes with quantization and sparsity implementation. We build PAROAttention based on the [SageAttention](https://github.com/thu-ml/SageAttention) code, and further integrate the tailored designs for $PV^{T}$ INT8 quantization and block-wise sparsity. Additionally, this package also includes the RoPE kernel with fused permutation mentioned in our paper. 
+
+This package includes PAROAttention codes with quantization and sparsity implementation. We build PAROAttention based on the [SageAttention](https://github.com/thu-ml/SageAttention) code, and further integrate the tailored designs for PAROAttention block-wise sparsity. 
 
 ## Installation
+
 - `python >= 3.9`, `torch >= 2.3.0`, `CUDA >= 11.8`
 - `flash-attn` for benchmarking
 - compile from source
       `
-            python setup.py install
+            python setup.py develop
       `
       or 
       `
             pip install -e .
       `
-- Note that this version only supports **Ampere (sm80)** GPUs, such as A100, A800 etc.
+- Note that this version is only verified on  **Ampere (sm80)** GPUs, such as A100, A800 etc.
 
-## Benchmarking
+## Operator-level Benchmarking
+
 - Attention acceleration under varying sparsity (0.2, 0.3, 0.5 density)
 
       cd bench
@@ -34,6 +37,17 @@ This package includes PAROAttention codes with quantization and sparsity impleme
 
       cd bench
       python bench_all.py --q_path your/path/to/q --k_path your/path/to/k --v_path your/path/to/v --permute_plan_path your/path/to/permute_plan
+
+## End-to-end Demo 
+
+### CogVideoX-5b
+
+We provide the example of PAROAttention cogvideox pipeline in `./example/pipeline_cogvideox.py`, adopting the `PARO_CogVideoXAttnProcessor` in `paroattention/cogvideox.py`. 
+
+You need to specify the `permute_plan.pth` and `sparse_plan.pth` path. 
+
+For comparison with FA2 to measure speedup, you could uncomment the `F.scaled_dot_product_attention` in the code to adopt the FA2 implementation, and compare the `Attention Time` of two approaches.
+
 
 ## License
 

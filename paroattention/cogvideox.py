@@ -176,21 +176,43 @@ class PARO_CogVideoXAttnProcessor2_0:
         INFO: the PAROAttention, replace the original scaled_dot_product_attention with PAROAttention.
         """
         
+        permute_qk(query, key, value, self.permute_plan, self.i_block)
+
         # support prefetch and not.
         self.events['total_start'].record()
 
         hidden_states = torch.empty((2, 48, 17776, 64), device = 'cuda', dtype=torch.bfloat16)      
-        permute_qk(query, key, value, self.permute_plan, self.i_block)
         sm_scale = 1 / (head_dim ** 0.5)
         q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(query, key, BLKQ=64, WARPQ=32, BLKK=64, tensor_layout="HND")
         
         if hasattr(self, "prefetch_stream"):
-            sparse_ = self.prefetch_stream.get_sparse_mask()
+            self.prefetch_stream.i_iter += 1
+            sparse_ = self.prefetch_stream.double_buffer[(self.prefetch_stream.i_iter) % 2]
             sparse_ = torch.stack([sparse_,sparse_],dim=0)
         else:
             sparse_ = torch.stack([self.sparse_mask[self.i_timestep,self.i_block],self.sparse_mask[self.i_timestep,self.i_block]],dim=0)
             
-        if self.i_timestep >= 10:
+        if hasattr(self, "prefetch_stream"):
+            # INFO: prefetch the sparse mask.
+            # launch the first Prefetch (P1),
+            # launch the attention kernel (K1)
+            # launch the second Prefetch (P2), wait for K1 to finish.
+            # overlap the time of prefetching data copy_ with attention kernel.
+            main_stream = torch.cuda.current_stream()
+            with torch.cuda.stream(self.prefetch_stream.stream):
+                if not hasattr(self.prefetch_stream, "done_first_prefetch"):
+                    self.prefetch_stream.done_first_prefetch = True
+                    self.prefetch_stream.double_buffer[(self.prefetch_stream.i_iter + 1) % 2].copy_(
+                        self.prefetch_stream.sparse_mask[self.prefetch_stream.i_iter + 1], non_blocking=True
+                    )
+                else:
+                    if self.prefetch_stream.i_iter < self.prefetch_stream.num_iterations - 1:
+                        self.prefetch_stream.stream.wait_stream(main_stream)
+                        self.prefetch_stream.double_buffer[(self.prefetch_stream.i_iter + 1) % 2].copy_(
+                            self.prefetch_stream.sparse_mask[self.prefetch_stream.i_iter + 1], non_blocking=True
+                        )
+            
+        if self.i_timestep >= 5:
             kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
         else:
             # INFO: use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.

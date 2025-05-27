@@ -69,8 +69,8 @@ def paroattn_convert(pipe):
     # H = 30
     # W = 45
     
-    sparse_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/sparse_plan.pth", map_location='cpu', weights_only=True)
-    permute_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/demo/new_sparse_debug_2/tune_sparse_rate_0.3/permute_plan.pth", map_location='cuda', weights_only=True)
+    sparse_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/new_sparse_debug_3/tune_sparse_rate_0.1/sparse_plan.pth", map_location='cpu', weights_only=True)
+    permute_plan = torch.load("/home/zhaotianchen/project/attn_quant/diffuser-dev/examples/cogvideo_attn/logs/calib_data/new_sparse_debug_3/tune_sparse_rate_0.1/permute_plan.pth", map_location='cuda', weights_only=True)
     
     sparse_mask = sparse_plan['sparse'].bool()  # [10, 42, 48, 278, 278] # torch.ones((10, 42, 48, 278, 278)).cpu() 
     empty_head = (~permute_plan['empty'].bool()).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).cpu()  # [42, 48]
@@ -114,6 +114,7 @@ def paroattn_convert(pipe):
         sparse_mask = sparse_mask.cuda()
     else:
         prefetch_stream = SparseMaskPrefetchStream(sparse_mask)
+        pipe.prefetch_stream = prefetch_stream
         
     # init the double buffer to all blocks.
     for i_block in range(len(pipe.transformer.transformer_blocks)):
@@ -139,9 +140,6 @@ def paroattn_convert(pipe):
         pipe.transformer.transformer_blocks[i_block].attn1.to_v.weight.div_(weight_rep_constant)
         pipe.transformer.transformer_blocks[i_block].attn1.to_v.bias.div_(weight_rep_constant)
         pipe.transformer.transformer_blocks[i_block].attn1.to_out[0].weight.mul_(weight_rep_constant)
-    pass
-    
-
 
 def main(args):
     seed_everything(args.seed)
@@ -169,7 +167,6 @@ def main(args):
             prompts.append(line.strip())
 
     for i, prompt in enumerate(prompts):
-        # 创建TimestepCallback实例，传入num_timestep_for_sparse_mask参数
         timestep_callback = TimestepCallback(num_timestep_for_sparse_mask=30)
         
         video = pipe(
@@ -182,6 +179,12 @@ def main(args):
             callback_on_step_end=timestep_callback.on_step_end,
             callback_on_step_end_tensor_inputs=["latents"],
         ).frames[0]
+        
+        if args.prefetch:
+            pipe.prefetch_stream.reset()  # reset the index inside prefetch_stream
+        # avoid it remains num_timestep_for_sparse_mask when generating 2nd video.
+        for i_block in range(len(pipe.transformer.transformer_blocks)):
+            pipe.transformer.transformer_blocks[i_block].attn1.processor.i_timestep = 0
 
         total_time = 0.0
         for b in range(42):
@@ -196,9 +199,6 @@ def main(args):
         outpath = os.path.join(save_path, f"output_{i}_paro_sparse.mp4")
         export_to_video(video, outpath, fps=8)
         print(f"Export video to {outpath}")
-
-
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
