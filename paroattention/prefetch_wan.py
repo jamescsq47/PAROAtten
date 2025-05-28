@@ -19,15 +19,13 @@ class TimestepCallback(PipelineCallback):
         })
         
         total_steps = len(pipeline.scheduler.timesteps)
+        step = step % total_steps  
         normalized_timestep = (step+1) / total_steps  # INFO: get the next step. 
-        
-        sparse_mask_timestep = int(normalized_timestep * self.num_timestep_for_sparse_mask)
-        
-        # print(f'at T={normalized_timestep:.3f}, mapped to sparse_mask_timestep={sparse_mask_timestep}')
-        
-        pipeline.transformer.i_timestep = normalized_timestep
+        self.sparse_mask_timestep = int(normalized_timestep * self.num_timestep_for_sparse_mask)
+        # print(f'at step:{step} T={normalized_timestep:.3f}, mapped to sparse_mask_timestep={self.sparse_mask_timestep}') 
+        pipeline.transformer.i_timestep = self.sparse_mask_timestep
         for i_block in range(len(pipeline.transformer.blocks)):
-            pipeline.transformer.blocks[i_block].attn1.processor.i_timestep = sparse_mask_timestep
+            pipeline.transformer.blocks[i_block].attn1.processor.i_timestep = self.sparse_mask_timestep
             
         return callback_kwargs
     
@@ -58,22 +56,22 @@ class SparseMaskPrefetchStream:
         # the n_iter should be reset after each pipeline run.
         self.i_iter = 0
 
-    def get_sparse_mask(self):
-        """
-        get the sparse mask and prefetch the next mask.
-        """
-        load_buf_id = self.i_iter % 2
-        write_buf_id = (self.i_iter + 1) % 2
+    # def get_sparse_mask(self):
+    #     """
+    #     get the sparse mask and prefetch the next mask.
+    #     """
+    #     load_buf_id = self.i_iter % 2
+    #     write_buf_id = (self.i_iter + 1) % 2
 
-        if self.i_iter < self.num_iterations - 1:
-            with torch.cuda.stream(self.stream):
-                self.double_buffer[write_buf_id].copy_(
-                    self.sparse_mask[self.i_iter + 1], non_blocking=True
-                )
+    #     if self.i_iter < self.num_iterations - 1:
+    #         with torch.cuda.stream(self.stream):
+    #             self.double_buffer[write_buf_id].copy_(
+    #                 self.sparse_mask[self.i_iter + 1], non_blocking=True
+    #             )
 
-        # 等待 prefetch 完成（也可考虑延迟 sync）
-        self.stream.synchronize()
-        self.i_iter += 1
+    #     # 等待 prefetch 完成（也可考虑延迟 sync）
+    #     self.stream.synchronize()
+    #     self.i_iter += 1
 
-        return self.double_buffer[load_buf_id]
+    #     return self.double_buffer[load_buf_id]
 

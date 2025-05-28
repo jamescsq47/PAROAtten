@@ -117,6 +117,7 @@ def paroattn_convert(pipe):
         sparse_mask = sparse_mask.cuda()
     else:
         prefetch_stream = SparseMaskPrefetchStream(sparse_mask)
+        pipe.prefetch_stream = prefetch_stream
         
     # init the double buffer to all blocks.
     for i_block in range(len(pipe.transformer.blocks)):
@@ -142,8 +143,6 @@ def paroattn_convert(pipe):
         pipe.transformer.blocks[i_block].attn1.to_v.weight.div_(weight_rep_constant)
         pipe.transformer.blocks[i_block].attn1.to_v.bias.div_(weight_rep_constant)
         pipe.transformer.blocks[i_block].attn1.to_out[0].weight.mul_(weight_rep_constant)
-    pass
-    
 
 
 def main(args):
@@ -181,7 +180,7 @@ def main(args):
 
     for i, prompt in enumerate(prompts):
         # 创建TimestepCallback实例，传入num_timestep_for_sparse_mask参数
-        timestep_callback = TimestepCallback(num_timestep_for_sparse_mask=30)
+        timestep_callback = TimestepCallback(num_timestep_for_sparse_mask=4)
         
         video = pipe(
             prompt=prompt,
@@ -203,6 +202,12 @@ def main(args):
         outpath = os.path.join(save_path, f"output_{i}_paro_sparse.mp4")
         export_to_video(video, outpath, fps=8)
         print(f"Export video to {outpath}")
+
+        if args.prefetch:
+            pipe.prefetch_stream.reset()  # reset the index inside prefetch_stream
+        # avoid it remains num_timestep_for_sparse_mask when generating 2nd video.
+        for i_block in range(len(pipe.transformer.blocks)):
+            pipe.transformer.blocks[i_block].attn1.processor.i_timestep = 0
         
         total_time = 0.0
         for b in range(40):
