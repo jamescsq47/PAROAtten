@@ -26,10 +26,10 @@ headdim = args.head_dim
 print(f"PAROAttention QK Int8 PV FP16 Benchmark with Varying Sparsity.")
 print(f"batch: {batch}, head: {head}, headdim: {headdim}, pv_accum_dtype: {args.pv_accum_dtype}")
 
-CTA_Q = 64
-CTA_K = 64
-WARP_Q = 32
-WARP_K = 64
+CTA_Q = 64 #64
+CTA_K = 64 #64
+WARP_Q = 32 #32
+WARP_K = 64 #64
 
 if args.pv_accum_dtype == 'fp16':
     kernel_int4 = qattn.qk_int4_sv_f16_accum_f16_attn
@@ -44,10 +44,11 @@ elif args.pv_accum_dtype == 'int8':
 _qk_quant_gran = 3 if args.quant_gran == 'per_thread' else 2
 
 
-for sparse_ratio in {0.0,0.5,1}:
+for sparse_ratio in {0.3}:
     is_causal = False
     _is_causal = 1 if is_causal else 0
-    for seq_len in {17776}: #1024, 2048, 4096, 8192, 16384, 32768
+    for seq_len in {8192, 17776, 32768}: #1024, 2048, 4096, 8192, 16384, 32768
+        print(seq_len)
         sparse = torch.zeros((batch,head,((CTA_K-1+seq_len)//CTA_K),((CTA_Q-1+seq_len)//CTA_Q)), dtype=bool).cuda()
         sparse[:,:,:,-1] = True  
         random_tensor = torch.rand(sparse.shape).cuda()
@@ -82,5 +83,5 @@ for sparse_ratio in {0.0,0.5,1}:
         _, time_fa = benchmark_forward(sdpa, q.to(torch.float16), k.to(torch.float16), v.to(torch.float16), is_causal=is_causal, repeats=100, verbose=False, desc='Triton')
         print(f'FA2: latency:{time_fa.mean*1e3}ms, flops: {flops/time_fa.mean*1e-12}TFLOPS/s')
         print(f'PARO: shape of input data: {q.shape}, sparse ratio: {sparse_ratio}, latency:{time_int8.mean*1e3}ms, flops: {flops/time_int8.mean*1e-12}TFLOPS/s, speed-up ratio(compared to FA2): {time_fa.mean/time_int8.mean}')
-        print(o_int8.isnan().sum())
+        # print(o_int8.isnan().sum())
         

@@ -212,7 +212,7 @@ class PARO_CogVideoXAttnProcessor2_0:
                             self.prefetch_stream.sparse_mask[self.prefetch_stream.i_iter + 1], non_blocking=True
                         )
             
-        if self.i_timestep >= 5:
+        if self.i_timestep >= 0:
             kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
         else:
             # INFO: use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.

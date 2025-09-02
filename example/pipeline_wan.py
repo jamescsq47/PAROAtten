@@ -75,7 +75,9 @@ def paroattn_convert(pipe):
     sparse_plan = torch.load("/home/xieruiqi/diffuser-dev520/examples/wan/logs/calib_data/720p/sparse_plan_expanded.pth", map_location='cpu', weights_only=True)
     permute_plan = torch.load("/home/xieruiqi/diffuser-dev520/examples/wan/logs/calib_data/720p/permute_plan.pth", map_location='cuda', weights_only=True)
     
-    sparse_mask = sparse_plan['sparse'].bool()  # [10, 42, 48, 278, 278] # torch.ones((10, 42, 48, 278, 278)).cpu() 
+    sparse_mask = sparse_plan['sparse'].bool()  # torch.Size([4, 40, 40, 1182, 1182]) # 
+    sparse_mask = torch.ones((4, 40, 40, 1182, 1182)).bool().cpu() 
+    print(sparse_mask.shape)
     empty_head = (~permute_plan['empty'].bool()).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).cpu()  # [42, 48]
     # sparse_mask = sparse_mask * empty_head    # assign empty head to sparse mask
 

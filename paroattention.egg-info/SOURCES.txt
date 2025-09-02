@@ -12,8 +12,10 @@ paroattention/__init__.py
 paroattention/cogvideox.py
 paroattention/core.py
 paroattention/prefetch_utils.py
+paroattention/prefetch_wan.py
 paroattention/quant.py
 paroattention/utils.py
+paroattention/wan.py
 paroattention.egg-info/PKG-INFO
 paroattention.egg-info/SOURCES.txt
 paroattention.egg-info/dependency_links.txt

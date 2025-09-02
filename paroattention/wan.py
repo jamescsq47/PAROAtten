@@ -2,6 +2,7 @@ import inspect
 import math
 import logging
 from typing import Optional
+# from SageAttention.sageattention.triton import attn_qk_int8_block_varlen
 import omegaconf
 from omegaconf import OmegaConf
 
@@ -11,10 +12,12 @@ import torch.nn.functional as F
 from diffusers.models.attention import Attention
 from paroattention.core import paroattn
 import paroattention._qattn_sm80 as qattn
-from .quant import per_block_int8 as per_block_int8_cuda
-from .quant import per_warp_int8 as per_warp_int8_cuda
+from paroattention.quant import per_block_int8 as per_block_int8_cuda
+from paroattention.quant import per_warp_int8 as per_warp_int8_cuda
 import sageattention._qattn_sm80 as qattn_sage
 import torch.cuda as cuda
+# import plotly.subplots as sp
+# import plotly.graph_objects as go
 
 kernel_paro = qattn.qk_int8_sv_f16_accum_f16_attn
 kernel_sage = qattn_sage.qk_int8_sv_f16_accum_f16_attn
@@ -203,12 +206,49 @@ class PARO_WanAttnProcessor2_0:
         sm_scale = 1 / (head_dim ** 0.5)
         q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(query, key, BLKQ=64, WARPQ=32, BLKK=64, tensor_layout="HND")
 
+        """
+        Dequant
+        """
+        # 先 pad 上去再截断
+        q_pad_tokens = 2364 * 32
+        if q_pad_tokens > 75600:
+            pad_len = q_pad_tokens - 75600
+            q_int8_padded = torch.cat([q_int8, torch.zeros(1, 40, pad_len, 128, dtype=q_int8.dtype, device=q_int8.device)], dim=2)
+        else:
+            q_int8_padded = q_int8
+
+        q_int8_reshaped = q_int8_padded.view(1, 40, 2364, 32, 128)
+        q_scale_expanded = q_scale.view(1, 40, 2364, 1, 1)
+        q_dequant = q_int8_reshaped.float() * q_scale_expanded  # broadcasting
+
+        # 截断多余部分
+        q_dequant = q_dequant.view(1, 40, -1, 128)[:, :, :75600, :].to(torch.bfloat16)
+
+
+        # k_int8: [1, 40, 75600, 128]
+        # k_scale: [1, 40, 1182]
+        # 1182 × 64 = 75648，实际只要前 75600
+
+        k_pad_tokens = 1182 * 64
+        if k_pad_tokens > 75600:
+            pad_len = k_pad_tokens - 75600
+            k_int8_padded = torch.cat([k_int8, torch.zeros(1, 40, pad_len, 128, dtype=k_int8.dtype, device=k_int8.device)], dim=2)
+        else:
+            k_int8_padded = k_int8
+
+        k_int8_reshaped = k_int8_padded.view(1, 40, 1182, 64, 128)
+        k_scale_expanded = k_scale.view(1, 40, 1182, 1, 1)
+        k_dequant = k_int8_reshaped.float() * k_scale_expanded  # broadcasting
+
+        # 截断多余部分
+        k_dequant = k_dequant.view(1, 40, -1, 128)[:, :, :75600, :].to(torch.bfloat16)
+
         if hasattr(self, "prefetch_stream"):
             self.prefetch_stream.i_iter += 1
             sparse_ = self.prefetch_stream.double_buffer[(self.prefetch_stream.i_iter) % 2]
             # sparse_ = torch.stack([sparse_,sparse_],dim=0)
         else:
-            sparse_ = torch.stack([self.sparse_mask[self.i_timestep,self.i_block],self.sparse_mask[self.i_timestep,self.i_block]],dim=0)
+            sparse_ = self.sparse_mask[self.i_timestep,self.i_block]
         
         if hasattr(self, "prefetch_stream"):
             # INFO: prefetch the sparse mask.
@@ -229,14 +269,36 @@ class PARO_WanAttnProcessor2_0:
                         self.prefetch_stream.double_buffer[(self.prefetch_stream.i_iter + 1) % 2].copy_(
                             self.prefetch_stream.sparse_mask[self.prefetch_stream.i_iter + 1], non_blocking=True
                         )
-
-        if self.i_timestep >= 2:
-            kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
-        else:
-            # INFO: use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.
-            hidden_states = F.scaled_dot_product_attention(
+        # if self.i_timestep >= 0:
+        #     print(f"i_timestep={self.i_timestep}, i_block={self.i_block}")
+        #     kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
+        # else:
+        #     # INFO: use the code under to replace paroattention for the profiling of the original scaled_dot_product_attention.
+        #     hidden_states = F.scaled_dot_product_attention(
+        #         query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        #     )
+        kernel_paro(q_int8, k_int8, value.to(torch.float16), hidden_states, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
+        hidden_states_real = F.scaled_dot_product_attention(
                 query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
             )
+        hidden_states_quant = F.scaled_dot_product_attention(
+                q_dequant, k_dequant, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+            )
+        hidden_states_quant_kernel = torch.zeros_like(hidden_states)
+        kernel_paro(q_dequant, k_dequant, value.to(torch.float16), hidden_states_quant_kernel, q_scale, k_scale, 1, 0, 2, sm_scale, 0, sparse_) 
+        # quant_attn = F.scaled_dot_product_attention(
+        #     q_int8.to(torch.float16),
+        #     k_int8.to(torch.float16),
+        #     value.to(torch.float16), attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        #     )
+        q_scale_ = q_scale.repeat_interleave(32, dim=2)[:, :, :75600]  # [1, 40, 75600]
+        k_scale_ = k_scale.repeat_interleave(64, dim=2)[:, :, :75600]  # [1, 40, 75600]
+        attn_scale = q_scale_ * k_scale_
+        import ipdb; ipdb.set_trace()
+        # attn_scale = attn_scale.unsqueeze(-1)
+        # attn_out_sim = quant_attn * attn_scale
+        # attn_out_sim = attn_out_sim.to(torch.float16)
+        # import ipdb; ipdb.set_trace()
         
         self.events['total_end'].record()
         cuda.synchronize()
