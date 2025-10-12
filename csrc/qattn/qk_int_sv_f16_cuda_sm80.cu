@@ -370,12 +370,12 @@
      }
      else{
        flag = sparse[num_block_q*(bx+head_id*num_block_q+batch_id*num_block_q*num_qo_heads)+iter];
-        load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
-          &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K,flag);
-        cp_async::commit_group();
-        load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
-          &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V,flag);
-        cp_async::commit_group();
+        // load_global_to_share<global_to_shared_line_lanes_QK, global_to_shared_copy_lines_per_warp_QK, QK_smem_iters_row, K_smem_iters_col, swizzle_mode_QK, QK_SMEM_STRIDE / PACK_SIZE_QK, CTA_K>(
+        //   &K_lane_base_ptr, K_smem_offset_load, stride_seq_k, smem_K,flag);
+        // cp_async::commit_group();
+        // load_global_to_share<global_to_shared_line_lanes_V, global_to_shared_copy_lines_per_warp_V, V_smem_iters_row, V_smem_iters_col, swizzle_mode_V, V_SMEM_STRIDE / PACK_SIZE_V, CTA_K>(
+        //   &V_lane_base_ptr, V_smem_offset_load, stride_seq_v, smem_V,flag);
+        // cp_async::commit_group();
         // K_lane_base_ptr +=  CTA_K * stride_seq_k;
         // V_lane_base_ptr +=  CTA_K * stride_seq_v;
       

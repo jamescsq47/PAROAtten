@@ -90,11 +90,11 @@ def paroattn_qk_int8_pv_fp16_cuda(
     q: torch.Tensor, 
     k: torch.Tensor, 
     v: torch.Tensor,
+    sparse: torch.Tensor,
     tensor_layout: str = "HND",
     is_causal: bool = False,
     qk_quant_gran: str = "per_warp",
     sm_scale: Optional[float] = None,
-    sparse: torch.Tensor = None,
     return_lse: bool = False,
     **kwargs: Any,
 ) -> torch.Tensor:
@@ -157,6 +157,7 @@ def paroattn_qk_int8_pv_fp16_cuda(
     - `smooth_k` will introduce slight overhead but will improve the accuracy under most circumstances.
     """
 
+    # print(sparse.float().sum())
     dtype = q.dtype
     assert q.is_cuda, "Input tensors must be on cuda."
     assert dtype in [torch.float16, torch.bfloat16], "Input tensors must be in dtype of torch.float16 or torch.bfloat16"
